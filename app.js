@@ -7,6 +7,7 @@ const state = {
   date: '',
   partyName: '',
   rows: [],
+  pendingParties: [],
   parties: [],
   catalog: [],
   catalogMap: new Map(),
@@ -18,7 +19,8 @@ const state = {
   toastTimer: null,
   batchSentAt: '',
   batchNeedsUpdate: false,
-  syncing: false
+  syncing: false,
+  previewRowId: ''
 };
 
 const KEYS = {
@@ -54,6 +56,30 @@ function escapeHtml(value = '') {
 function copySafe(value) { return String(value ?? '').replace(/[\t\r\n]+/g, ' ').trim(); }
 function calcTotal(row) { return Number(row.qty || 0) * Number(row.rate || 0); }
 function meaningful(row) { return Boolean(String(row.sku || '').trim() || Number(row.rate || 0) || String(row.remarks || '').trim()); }
+function wholeAmount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+function activeMeaningfulRows() { return state.rows.filter(meaningful); }
+function currentPartyGroup() {
+  const rows = activeMeaningfulRows();
+  const partyName = getPartyName();
+  return rows.length ? { id: 'active', partyName, rows } : null;
+}
+function sessionGroups() {
+  const groups = state.pendingParties.map(g => ({ ...g, rows: (g.rows || []).filter(meaningful) })).filter(g => g.rows.length);
+  const active = currentPartyGroup();
+  if (active) groups.push(active);
+  return groups;
+}
+function sessionProductCount() { return sessionGroups().reduce((sum, g) => sum + g.rows.length, 0); }
+function sessionTotals() {
+  const groups = sessionGroups();
+  return {
+    qty: groups.reduce((s, g) => s + g.rows.reduce((q, r) => q + Number(r.qty || 0), 0), 0),
+    total: groups.reduce((s, g) => s + g.rows.reduce((t, r) => t + calcTotal(r), 0), 0)
+  };
+}
 function cleanBackendUrl(value) {
   const v = String(value || '').trim();
   if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:\?.*)?$/i.test(v)) return '';
@@ -283,7 +309,7 @@ function saveDraft() {
   state.partyName = getPartyName();
   const draft = {
     updatedAt: new Date().toISOString(), date: state.date, partyName: state.partyName,
-    rows: state.rows, batchSentAt: state.batchSentAt, batchNeedsUpdate: state.batchNeedsUpdate
+    rows: state.rows, pendingParties: state.pendingParties, batchSentAt: state.batchSentAt, batchNeedsUpdate: state.batchNeedsUpdate
   };
   try { localStorage.setItem(KEYS.draft, JSON.stringify(draft)); } catch (_) {}
 }
@@ -293,7 +319,7 @@ function migrateOldDraft() {
     if (!old || !Array.isArray(old.rows) || !old.rows.length) return null;
     const first = old.rows[0] || {};
     return {
-      date: first.date || todayISO(), partyName: first.partyName || '', batchSentAt: '', batchNeedsUpdate: false,
+      date: first.date || todayISO(), partyName: first.partyName || '', pendingParties: [], batchSentAt: '', batchNeedsUpdate: false,
       rows: old.rows.map(r => ({
         ...rowTemplate(), id: r.id || uid(), sku: r.sku || '', qty: Number(r.qty || 1), rate: r.rate === 0 ? '' : (r.rate ?? ''),
         compareRate: r.compareRate === 0 ? '' : (r.compareRate ?? ''), remarks: r.remarks || '', productTitle: r.productTitle || '',
@@ -320,10 +346,17 @@ function writeHistory(items) {
   try { localStorage.setItem(KEYS.history, JSON.stringify(items.slice(0, 100))); } catch (_) {}
 }
 function currentBatchSnapshot() {
-  const rows = state.rows.filter(meaningful).map(r => ({ ...r }));
-  if (!rows.length) return null;
+  const groups = sessionGroups().map(g => ({
+    id: g.id || uid(),
+    partyName: g.partyName || '',
+    rows: g.rows.map(r => ({ ...r }))
+  }));
+  if (!groups.length) return null;
+  const rows = groups.flatMap(g => g.rows.map(r => ({ ...r, partyName: g.partyName })));
   return {
-    id: uid(), createdAt: new Date().toISOString(), date: state.date, partyName: getPartyName(), rows,
+    id: uid(), createdAt: new Date().toISOString(), date: state.date,
+    partyName: groups.length === 1 ? groups[0].partyName : `${groups.length} Parties`,
+    groups, rows,
     totalQty: rows.reduce((s, r) => s + Number(r.qty || 0), 0),
     totalAmount: rows.reduce((s, r) => s + calcTotal(r), 0)
   };
@@ -410,7 +443,22 @@ async function loadReferenceData() {
   }
 }
 
+function renderPendingParties() {
+  const wrap = $('#pendingPartiesSection');
+  if (!wrap) return;
+  const groups = state.pendingParties.filter(g => (g.rows || []).some(meaningful));
+  if (!groups.length) { wrap.innerHTML = ''; wrap.classList.add('hidden'); return; }
+  wrap.innerHTML = `${groups.map((g, index) => {
+    const rows = (g.rows || []).filter(meaningful);
+    const qty = rows.reduce((s, r) => s + Number(r.qty || 0), 0);
+    const total = rows.reduce((s, r) => s + calcTotal(r), 0);
+    return `<div class="pending-party-card"><div class="pending-party-main"><div class="pending-party-name">${escapeHtml(g.partyName || 'Party')}</div><div class="pending-party-meta">${rows.length} product${rows.length === 1 ? '' : 's'} • Qty ${money(qty)} • ৳${money(total)}</div></div><div class="pending-party-badge">PARTY ${index + 1}</div></div>`;
+  }).join('')}<div class="party-divider">Next Party</div>`;
+  wrap.classList.remove('hidden');
+}
+
 function renderAll() {
+  renderPendingParties();
   const container = $('#productsContainer');
   container.innerHTML = '';
   state.rows.forEach((row, index) => container.appendChild(renderProductCard(row, index)));
@@ -422,7 +470,8 @@ function renderProductCard(row, index) {
   const card = document.createElement('article');
   card.className = 'product-card';
   card.dataset.rowId = row.id;
-  const compareText = row.compareLoading ? 'Loading…' : (row.compareRate === '' || row.compareRate === null || row.compareRate === undefined ? 'Nil' : `৳${money(row.compareRate)}`);
+  const compareWhole = wholeAmount(row.compareRate);
+  const compareText = row.compareLoading ? 'Loading…' : (compareWhole === null ? 'Nil' : `৳${money(compareWhole)}`);
   card.innerHTML = `
     <div class="product-card-head">
       <div class="product-number">PRODUCT ${index + 1}</div>
@@ -453,12 +502,13 @@ function renderProductCard(row, index) {
 }
 
 function updateSummary() {
-  const rows = state.rows.filter(meaningful);
+  const rows = activeMeaningfulRows();
   const qty = rows.reduce((sum, r) => sum + Number(r.qty || 0), 0);
   const total = rows.reduce((sum, r) => sum + calcTotal(r), 0);
+  const session = sessionTotals();
   $('#totalQty').textContent = money(qty);
   $('#totalAmount').textContent = `৳${money(total)}`;
-  $('#grandTotalTop').textContent = `৳${money(total)}`;
+  $('#grandTotalTop').textContent = `৳${money(session.total)}`;
   const send = $('#sendBatchBtn');
   if (state.batchSentAt && !state.batchNeedsUpdate) send.textContent = '✓ Sent to Sheet';
   else if (state.batchSentAt && state.batchNeedsUpdate) send.textContent = 'Update Sheet';
@@ -514,7 +564,7 @@ async function loadCompareRate(row, card) {
     const res = await jsonp('compareRate', { pin: state.pin, sku }, 25000);
     if (!res.ok) throw new Error(res.error || 'Compare rate lookup failed.');
     if (row.sku !== sku) return;
-    row.compareRate = res.rate === null || res.rate === undefined || res.rate === '' ? '' : Number(res.rate);
+    row.compareRate = res.rate === null || res.rate === undefined || res.rate === '' ? '' : Math.trunc(Number(res.rate));
   } catch (_) {
     if (row.sku === sku) row.compareRate = '';
   } finally {
@@ -523,7 +573,8 @@ async function loadCompareRate(row, card) {
     const currentBox = currentCard?.querySelector('[data-compare]');
     if (currentBox) {
       currentBox.classList.remove('loading');
-      currentBox.textContent = row.compareRate === '' ? 'Nil' : `৳${money(row.compareRate)}`;
+      const v = wholeAmount(row.compareRate);
+      currentBox.textContent = v === null ? 'Nil' : `৳${money(v)}`;
     }
     saveDraft();
   }
@@ -605,7 +656,7 @@ $('#productsContainer').addEventListener('click', (event) => {
   if (event.target.closest('[data-action="use-compare"]')) {
     if (row.compareLoading) return showToast('Compare Rate is still loading.');
     if (row.compareRate === '' || row.compareRate === null || row.compareRate === undefined) return showToast('Compare Rate is Nil.');
-    row.rate = Number(row.compareRate || 0);
+    row.rate = Math.trunc(Number(row.compareRate || 0));
     const rateInput = card.querySelector('[data-field="rate"]');
     if (rateInput) rateInput.value = String(row.rate);
     const line = card.querySelector('[data-line-total]');
@@ -641,6 +692,7 @@ $('#productsContainer').addEventListener('click', (event) => {
   }
   if (event.target.closest('[data-action="preview"]')) {
     if (!row.imageUrl) return showToast(row.sku ? 'No Shopify image for this SKU.' : 'Select a Shopify product first.');
+    state.previewRowId = row.id;
     $('#previewImage').src = row.imageUrl;
     $('#previewSku').textContent = `SKU: ${row.sku}`;
     $('#previewTitle').textContent = row.productTitle || 'Product';
@@ -669,6 +721,109 @@ $('#previewPriceToggle').addEventListener('click', () => {
   $('#previewPriceEye').textContent = next ? '◉' : '👁';
 });
 
+
+async function imageElementFromBlob(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not prepare product image.')); };
+    img.src = url;
+  });
+}
+
+async function buildProductPhotoCard(row) {
+  if (!row?.imageUrl) throw new Error('Product image is not available.');
+  const response = await fetch(row.imageUrl, { mode: 'cors', cache: 'force-cache' });
+  if (!response.ok) throw new Error('Could not load product image.');
+  const image = await imageElementFromBlob(await response.blob());
+  const canvas = document.createElement('canvas');
+  canvas.width = 1080;
+  canvas.height = 1350;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const area = { x: 54, y: 54, w: 972, h: 1110 };
+  const scale = Math.min(area.w / image.naturalWidth, area.h / image.naturalHeight);
+  const dw = image.naturalWidth * scale;
+  const dh = image.naturalHeight * scale;
+  const dx = area.x + (area.w - dw) / 2;
+  const dy = area.y + (area.h - dh) / 2;
+  ctx.drawImage(image, dx, dy, dw, dh);
+
+  ctx.strokeStyle = '#eeeeee';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(54, 1192);
+  ctx.lineTo(1026, 1192);
+  ctx.stroke();
+
+  const sku = String(row.sku || '').trim();
+  ctx.fillStyle = '#111214';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '700 54px Arial, sans-serif';
+  const maxWidth = 900;
+  let fontSize = 54;
+  while (ctx.measureText(sku).width > maxWidth && fontSize > 30) {
+    fontSize -= 2;
+    ctx.font = `700 ${fontSize}px Arial, sans-serif`;
+  }
+  ctx.fillText(sku, 540, 1268, maxWidth);
+
+  return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not create photo card.')), 'image/jpeg', 0.94));
+}
+
+function safeFileName(value) {
+  return String(value || 'product').trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').slice(0, 80) || 'product';
+}
+
+async function savePreviewPhotoCard() {
+  const row = getRow(state.previewRowId);
+  if (!row) return showToast('Open a product preview first.');
+  const btn = $('#savePhotoCardBtn');
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    const blob = await buildProductPhotoCard(row);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${safeFileName(row.sku)}.jpg`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    showToast('Photo card saved.');
+  } catch (err) { showToast(err.message || 'Could not save photo card.', 3500); }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
+
+async function sharePreviewPhotoCard() {
+  const row = getRow(state.previewRowId);
+  if (!row) return showToast('Open a product preview first.');
+  const btn = $('#sharePhotoCardBtn');
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Preparing…';
+  try {
+    const blob = await buildProductPhotoCard(row);
+    const file = new File([blob], `${safeFileName(row.sku)}.jpg`, { type: 'image/jpeg' });
+    if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+      await navigator.share({ files: [file], title: row.sku || 'Product' });
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = file.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      showToast('Sharing is not supported here. Card saved instead.');
+    }
+  } catch (err) {
+    if (err?.name !== 'AbortError') showToast(err.message || 'Could not share photo card.', 3500);
+  } finally { btn.disabled = false; btn.textContent = old; }
+}
+
+$('#savePhotoCardBtn').addEventListener('click', savePreviewPhotoCard);
+$('#sharePhotoCardBtn').addEventListener('click', sharePreviewPhotoCard);
+
 document.addEventListener('click', (event) => {
   if (!event.target.closest('.sku-field')) closeSearches();
   if (!event.target.closest('.party-field')) $('#partyResults')?.classList.add('hidden');
@@ -694,6 +849,26 @@ function addProduct(focus = true) {
   if (focus) setTimeout(() => card.querySelector('.sku-input')?.focus(), 40);
 }
 $('#addAnotherBtn').addEventListener('click', () => addProduct());
+
+function moveToNextParty() {
+  if (state.batchSentAt && !state.batchNeedsUpdate) return showToast('This purchase is already sent. Use New Purchase.');
+  const party = getPartyName();
+  const rows = activeMeaningfulRows();
+  if (!party) return showToast('Select or enter the current Party Name first.');
+  if (!rows.length) return showToast('Add at least one product before moving to Next Party.');
+  if (rows.some(r => !String(r.sku || '').trim())) return showToast('Every product needs an SKU.');
+  state.pendingParties.push({ id: uid(), partyName: party, rows: rows.map(r => ({ ...r })) });
+  state.partyName = '';
+  state.rows = [rowTemplate()];
+  $('#partyInput').value = '';
+  state.batchNeedsUpdate = Boolean(state.batchSentAt);
+  renderPartySelect();
+  renderAll();
+  saveDraft();
+  setTimeout(() => $('#partyInput')?.focus(), 40);
+  showToast('Next Party ready. Previous party kept in this purchase.');
+}
+$('#nextPartyBtn').addEventListener('click', moveToNextParty);
 
 $('#purchaseDate').addEventListener('change', () => { state.date = $('#purchaseDate').value || todayISO(); markBatchDirty(); });
 
@@ -803,13 +978,13 @@ function submitBatchDirect(formParams, requestId, timeoutMs = 12000) {
 }
 
 async function sendBatchToSheet() {
-  const party = getPartyName();
-  const rows = state.rows.filter(meaningful);
-  if (!party) return showToast('Select or enter a Party Name.');
-  if (!rows.length) return showToast('Add at least one product.');
-  if (rows.some(r => !String(r.sku || '').trim())) return showToast('Every product needs an SKU.');
+  const groups = sessionGroups();
+  if (!groups.length) return showToast('Add at least one product.');
+  if (groups.some(g => !String(g.partyName || '').trim())) return showToast('Every party needs a Party Name.');
+  if (groups.some(g => g.rows.some(r => !String(r.sku || '').trim()))) return showToast('Every product needs an SKU.');
   if (!navigator.onLine) return showToast('Internet is required to send to Google Sheet.');
 
+  const allRows = groups.flatMap(g => g.rows.map(r => ({ row: r, partyName: g.partyName })));
   const btn = $('#sendBatchBtn');
   const oldText = btn.textContent;
   btn.disabled = true;
@@ -817,9 +992,10 @@ async function sendBatchToSheet() {
 
   try {
     const requestId = uid();
-    const payloadRows = rows.map(r => ({
+    const payloadRows = allRows.map(({ row: r, partyName }) => ({
       entryId: r.id,
       sheetRow: Number(r.sheetRow || 0),
+      partyName,
       sku: r.sku,
       qty: Number(r.qty || 0),
       rate: Number(r.rate || 0),
@@ -831,21 +1007,22 @@ async function sendBatchToSheet() {
       requestId,
       pin: state.pin,
       date: state.date || todayISO(),
-      partyName: party,
+      partyName: '',
       isUpdate: state.batchSentAt ? '1' : '0',
       itemsJson: JSON.stringify(payloadRows)
-    }, requestId);
+    }, requestId, 9000);
 
     if (!ack?.ok) throw new Error(ack?.error || 'Could not send products to Google Sheet.');
-    if (Number(ack.count || 0) !== rows.length) throw new Error('Google Sheet did not save all products. Please try again.');
+    if (Number(ack.count || 0) !== allRows.length) throw new Error('Google Sheet did not save all products. Please try again.');
 
     const rowMap = ack.rows || {};
-    rows.forEach(r => { r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0); });
+    state.pendingParties.forEach(g => (g.rows || []).forEach(r => { r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0); }));
+    state.rows.forEach(r => { r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0); });
     state.batchSentAt = new Date().toISOString();
     state.batchNeedsUpdate = false;
     saveDraft();
     updateSummary();
-    showToast(`${rows.length} product${rows.length === 1 ? '' : 's'} sent to Google Sheet.`);
+    showToast(`${allRows.length} product${allRows.length === 1 ? '' : 's'} sent to Google Sheet.`);
   } catch (err) {
     showToast(err.message || 'Could not send to Google Sheet.', 3800);
   } finally {
@@ -858,12 +1035,12 @@ async function sendBatchToSheet() {
 $('#sendBatchBtn').addEventListener('click', sendBatchToSheet);
 
 async function copyForExcel() {
-  const party = getPartyName();
-  const rows = state.rows.filter(meaningful);
+  const groups = sessionGroups();
+  const rows = groups.flatMap(g => g.rows.map(r => ({ ...r, partyName: g.partyName })));
   if (!rows.length) return showToast('Nothing to copy.');
   const lines = [
     ['Date','Party Name','SKU','Qnt','Rate','Total','Compare Rate','Remarks'].join('\t'),
-    ...rows.map(r => [copySafe(state.date), copySafe(party), copySafe(r.sku), Number(r.qty || 0), Number(r.rate || 0), calcTotal(r), r.compareRate === '' ? '' : Number(r.compareRate || 0), copySafe(r.remarks)].join('\t'))
+    ...rows.map(r => [copySafe(state.date), copySafe(r.partyName), copySafe(r.sku), Number(r.qty || 0), Number(r.rate || 0), calcTotal(r), wholeAmount(r.compareRate) ?? '', copySafe(r.remarks)].join('\t'))
   ];
   const text = lines.join('\n');
   try { await navigator.clipboard.writeText(text); }
@@ -876,11 +1053,11 @@ $('#copyBtn').addEventListener('click', () => { copyForExcel(); closeDrawer(); }
 
 function resetCurrent({ archive = true } = {}) {
   if (archive && state.rows.some(meaningful)) archiveCurrent();
-  state.date = todayISO(); state.partyName = ''; state.rows = [rowTemplate()]; state.batchSentAt = ''; state.batchNeedsUpdate = false;
+  state.date = todayISO(); state.partyName = ''; state.rows = [rowTemplate()]; state.pendingParties = []; state.batchSentAt = ''; state.batchNeedsUpdate = false;
   $('#purchaseDate').value = state.date; renderPartySelect(); renderAll(); saveDraft();
 }
 $('#newPurchaseTopBtn').addEventListener('click', () => {
-  const count = state.rows.filter(meaningful).length;
+  const count = sessionProductCount();
   if (!count) {
     resetCurrent({ archive: false });
     return showToast('New purchase ready.');
@@ -899,7 +1076,7 @@ function openHistory() {
   if (!items.length) list.innerHTML = '<div class="search-empty">No history saved yet.</div>';
   else list.innerHTML = items.map(item => `
     <div class="history-item">
-      <div><div class="history-item-title">${escapeHtml(item.partyName || 'No Party')}</div><div class="history-item-meta">${escapeHtml(item.date || '')} • ${item.rows?.length || 0} products • Qty ${money(item.totalQty)} • ৳${money(item.totalAmount)}</div></div>
+      <div><div class="history-item-title">${escapeHtml(item.partyName || 'No Party')}</div><div class="history-item-meta">${escapeHtml(item.date || '')} • ${item.rows?.length || 0} products${item.groups?.length > 1 ? ` • ${item.groups.length} parties` : ''} • Qty ${money(item.totalQty)} • ৳${money(item.totalAmount)}</div></div>
       <button class="btn" type="button" data-restore-history="${escapeHtml(item.id)}">Restore</button>
     </div>`).join('');
   $('#historyModal').classList.remove('hidden'); closeDrawer();
@@ -912,9 +1089,19 @@ $('#historyList').addEventListener('click', (event) => {
   if (!item) return showToast('History item not found.');
   if (state.rows.some(meaningful) && !confirm('Restore this history? Current entries will be archived first.')) return;
   if (state.rows.some(meaningful)) archiveCurrent();
-  state.date = item.date || todayISO(); state.partyName = item.partyName || '';
-  state.rows = (item.rows || []).map(r => ({ ...rowTemplate(), ...r, id: r.id || uid() }));
-  if (!state.rows.length) state.rows = [rowTemplate()];
+  state.date = item.date || todayISO();
+  if (Array.isArray(item.groups) && item.groups.length) {
+    const restored = item.groups.map(g => ({ id: g.id || uid(), partyName: g.partyName || '', rows: (g.rows || []).map(r => ({ ...rowTemplate(), ...r, id: r.id || uid() })) }));
+    const active = restored.pop();
+    state.pendingParties = restored;
+    state.partyName = active?.partyName || '';
+    state.rows = active?.rows?.length ? active.rows : [rowTemplate()];
+  } else {
+    state.pendingParties = [];
+    state.partyName = item.partyName || '';
+    state.rows = (item.rows || []).map(r => ({ ...rowTemplate(), ...r, id: r.id || uid() }));
+    if (!state.rows.length) state.rows = [rowTemplate()];
+  }
   state.batchSentAt = ''; state.batchNeedsUpdate = false;
   $('#purchaseDate').value = state.date; renderPartySelect(); renderAll(); saveDraft();
   $('#historyModal').classList.add('hidden'); showToast('History restored.');
@@ -1015,6 +1202,7 @@ async function initApp() {
   const draft = readDraft();
   state.date = draft?.date || todayISO();
   state.partyName = draft?.partyName || '';
+  state.pendingParties = Array.isArray(draft?.pendingParties) ? draft.pendingParties.map(g => ({ id: g.id || uid(), partyName: g.partyName || '', rows: (g.rows || []).map(r => ({ ...rowTemplate(), ...r, id: r.id || uid(), rate: r.rate === 0 ? '' : r.rate })) })) : [];
   state.rows = Array.isArray(draft?.rows) && draft.rows.length ? draft.rows.map(r => ({ ...rowTemplate(), ...r, id: r.id || uid(), rate: r.rate === 0 ? '' : r.rate })) : [rowTemplate()];
   state.batchSentAt = draft?.batchSentAt || '';
   state.batchNeedsUpdate = Boolean(draft?.batchNeedsUpdate);

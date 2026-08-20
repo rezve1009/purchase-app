@@ -10,7 +10,7 @@
   <title>Daily Purchase</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-  <link rel="stylesheet" href="./styles.css?v=4.3.0" />
+  <link rel="stylesheet" href="./styles.css?v=4.4.0" />
 </head>
 <body>
   <div id="loginScreen" class="login-screen">
@@ -71,6 +71,7 @@
 
     <main>
       <div id="catalogNotice" class="catalog-notice hidden"></div>
+      <section id="pendingPartiesSection" class="pending-parties hidden"></section>
       <section id="productsContainer" class="products-list"></section>
       <div id="emptyState" class="empty-state hidden">
         <div class="empty-plus">＋</div>
@@ -85,6 +86,7 @@
         </div>
         <div class="bottom-actions">
           <button id="addAnotherBtn" class="btn" type="button">＋ Add Product</button>
+          <button id="nextPartyBtn" class="btn" type="button">Next Party →</button>
           <button id="sendBatchBtn" class="btn primary send-batch" type="button">Send to Sheet</button>
         </div>
       </section>
@@ -119,7 +121,7 @@
       <button id="connectionBtn" class="drawer-action" type="button"><span>⌁</span><div><strong>Connection</strong><small>Change Apps Script URL</small></div></button>
       <button id="logoutBtn" class="drawer-action" type="button"><span>↪</span><div><strong>Log out</strong><small>Clear PIN from this session</small></div></button>
     </div>
-    <div class="version-text">v4.3</div>
+    <div class="version-text">v4.4</div>
   </aside>
 
   <div id="toast" class="toast"></div>
@@ -139,6 +141,10 @@
             <span id="previewPriceEye" class="price-eye" aria-hidden="true">👁</span>
           </button>
         </div>
+        <div class="preview-card-actions">
+          <button id="savePhotoCardBtn" class="btn" type="button">⇩ Save Card</button>
+          <button id="sharePhotoCardBtn" class="btn primary" type="button">↗ Share Card</button>
+        </div>
       </div>
     </div>
   </div>
@@ -154,6 +160,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=4.3.0" defer></script>
+  <script src="./app.js?v=4.4.0" defer></script>
 </body>
 </html>
