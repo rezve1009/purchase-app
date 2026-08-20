@@ -550,6 +550,7 @@ function renderProductCard(row, index, groupId = 'active') {
       <div class="field remarks-field"><label class="label">Remarks</label><textarea class="textarea" data-field="remarks" rows="1" placeholder="Remarks">${escapeHtml(row.remarks || '')}</textarea></div>
     </div>
     <div class="line-total"><span>Line Total</span><strong data-line-total>৳${money(calcTotal(row))}</strong></div>`;
+  wireProductCard(card);
   return card;
 }
 
@@ -614,18 +615,32 @@ function renderSearchResults(card, row, query) {
 
 function scheduleLocalSearch(card, row, query) {
   clearTimeout(state.searchTimers.get(row.id));
-  state.searchTimers.set(row.id, setTimeout(() => {
+  state.searchTimers.set(row.id, setTimeout(async () => {
     const clean = String(query || '').trim();
-    if (!clean) return card.querySelector('.sku-results').classList.add('hidden');
-    closeSearches(card.querySelector('.sku-results'));
+    const box = card.querySelector('.sku-results');
+    if (!clean) return box?.classList.add('hidden');
+    closeSearches(box);
+
+    // v4.7.1: recover the local index if catalog metadata is loaded but memory was not rebuilt.
     if (!state.catalogReady) {
-      const box = card.querySelector('.sku-results');
-      box.innerHTML = `<div class="search-empty">Product catalog is not ready yet.</div><div class="custom-search-action" data-action="custom-entry">＋ New Entry: ${escapeHtml(clean)}</div>`;
-      box.classList.remove('hidden');
+      try {
+        const items = await idbGetAll();
+        if (items.length) rebuildCatalogIndexes(items);
+      } catch (_) {}
+    }
+
+    if (!state.catalogReady) {
+      if (box) {
+        box.innerHTML = `<div class="search-empty">Product catalog is loading. Try again in a moment.</div><div class="custom-search-action" data-action="custom-entry">＋ New Entry: ${escapeHtml(clean)}</div>`;
+        box.classList.remove('hidden');
+      }
+      // Attempt a background recovery without blocking typing.
+      if (navigator.onLine && state.pin) refreshLocalCatalog({ forceMeta: true }).catch(() => {});
       return;
     }
+
     renderSearchResults(card, row, clean);
-  }, 65));
+  }, 55));
 }
 
 async function loadCompareRate(row, card) {
@@ -684,106 +699,128 @@ function applyCustomSku(row, card, sku) {
   loadCompareRate(row, card);
 }
 
-$('#appRoot').addEventListener('input', (event) => {
-  const field = event.target.closest('[data-field]');
-  if (!field) return;
-  const card = event.target.closest('.product-card');
-  const row = card ? getRow(card.dataset.rowId) : null;
-  if (!row) return;
-  const name = field.dataset.field;
-  if (name === 'qty') row.qty = Number(field.value || 0);
-  else if (name === 'rate') row.rate = field.value === '' ? '' : Number(field.value);
-  else row[name] = field.value;
+function wireProductCard(card) {
+  if (!card || card.dataset.productEventsWired === '1') return;
+  card.dataset.productEventsWired = '1';
 
-  if (name === 'sku') {
-    row.productTitle = ''; row.price = ''; row.imageUrl = ''; row.variantId = ''; row.isCustom = true; row.compareRate = '';
-    card.querySelector('[data-action="preview"]').innerHTML = '▧';
-    card.querySelector('[data-compare]').textContent = 'Nil';
-    scheduleLocalSearch(card, row, field.value);
-  }
-  if (name === 'qty' || name === 'rate') card.querySelector('[data-line-total]').textContent = `৳${money(calcTotal(row))}`;
-  markBatchDirty();
-});
+  const currentRow = () => getRow(card.dataset.rowId);
 
-$('#appRoot').addEventListener('focusin', (event) => {
-  if (!event.target.matches('.sku-input')) return;
-  const card = event.target.closest('.product-card');
-  const row = getRow(card.dataset.rowId);
-  if (row && event.target.value.trim()) scheduleLocalSearch(card, row, event.target.value);
-});
+  card.addEventListener('input', (event) => {
+    const field = event.target.closest('[data-field]');
+    if (!field) return;
+    const row = currentRow();
+    if (!row) return;
+    const name = field.dataset.field;
 
-$('#appRoot').addEventListener('keydown', (event) => {
-  if (!event.target.matches('.sku-input') || event.key !== 'Enter') return;
-  event.preventDefault();
-  const card = event.target.closest('.product-card');
-  const box = card.querySelector('.sku-results');
-  const first = box.querySelector('[data-result-index="0"]');
-  if (first) first.click();
-  else card.querySelector('[data-action="custom-entry"]')?.click();
-});
+    if (name === 'qty') row.qty = Number(field.value || 0);
+    else if (name === 'rate') row.rate = field.value === '' ? '' : Number(field.value);
+    else row[name] = field.value;
 
-$('#appRoot').addEventListener('click', (event) => {
-  const card = event.target.closest('.product-card');
-  if (!card) return;
-  const row = getRow(card.dataset.rowId);
-  if (!row) return;
+    if (name === 'sku') {
+      row.productTitle = '';
+      row.price = '';
+      row.imageUrl = '';
+      row.variantId = '';
+      row.isCustom = true;
+      row.compareRate = '';
+      const thumb = card.querySelector('[data-action="preview"]');
+      if (thumb) thumb.innerHTML = '▧';
+      const compare = card.querySelector('[data-compare]');
+      if (compare) compare.textContent = 'Nil';
+      scheduleLocalSearch(card, row, field.value);
+    }
 
-  if (event.target.closest('[data-action="use-compare"]')) {
-    if (row.compareLoading) return showToast('Compare Rate is still loading.');
-    if (row.compareRate === '' || row.compareRate === null || row.compareRate === undefined) return showToast('Compare Rate is Nil.');
-    row.rate = Math.trunc(Number(row.compareRate || 0));
-    const rateInput = card.querySelector('[data-field="rate"]');
-    if (rateInput) rateInput.value = String(row.rate);
-    const line = card.querySelector('[data-line-total]');
-    if (line) line.textContent = `৳${money(calcTotal(row))}`;
+    if (name === 'qty' || name === 'rate') {
+      const line = card.querySelector('[data-line-total]');
+      if (line) line.textContent = `৳${money(calcTotal(row))}`;
+    }
     markBatchDirty();
-    showToast('Compare Rate copied to Rate.');
-    return;
-  }
+  });
 
-  const resultBtn = event.target.closest('[data-result-index]');
-  if (resultBtn) {
-    const box = resultBtn.closest('.sku-results');
-    const item = box?._results?.[Number(resultBtn.dataset.resultIndex)];
-    if (item) applyProduct(row, card, item);
-    return;
-  }
-  if (event.target.closest('[data-action="custom-entry"]')) {
-    applyCustomSku(row, card, card.querySelector('[data-field="sku"]').value);
-    return;
-  }
-  if (event.target.closest('[data-action="new-entry"]')) {
-    const input = card.querySelector('[data-field="sku"]');
-    input.focus();
-    if (input.value.trim()) applyCustomSku(row, card, input.value);
-    else showToast('Type the new SKU here, then press Enter.');
-    return;
-  }
-  if (event.target.closest('[data-action="remove"]')) {
-    const group = getRowGroup(row.id);
-    if (!group) return;
-    group.rows = (group.rows || []).filter(r => r.id !== row.id);
-    if (group.id === 'active' && !group.rows.length) state.rows.push(rowTemplate());
-    renderAll(); markBatchDirty();
-    return;
-  }
-  if (event.target.closest('[data-action="preview"]')) {
-    if (!row.imageUrl) return showToast(row.sku ? 'No Shopify image for this SKU.' : 'Select a Shopify product first.');
-    state.previewRowId = row.id;
-    $('#previewImage').src = row.imageUrl;
-    $('#previewSku').textContent = `SKU: ${row.sku}`;
-    $('#previewTitle').textContent = row.productTitle || 'Product';
-    const priceToggle = $('#previewPriceToggle');
-    const hasPrice = !(row.price === '' || row.price === null || row.price === undefined);
-    priceToggle.dataset.price = hasPrice ? String(row.price) : '';
-    priceToggle.dataset.revealed = 'false';
-    priceToggle.setAttribute('aria-pressed', 'false');
-    priceToggle.setAttribute('aria-label', hasPrice ? 'Show sale price' : 'Sale price unavailable');
-    $('#previewPriceValue').textContent = hasPrice ? '••••••' : 'Not available';
-    $('#previewPriceEye').textContent = '👁';
-    $('#imageModal').classList.remove('hidden');
-  }
-});
+  card.addEventListener('focusin', (event) => {
+    if (!event.target.matches('.sku-input')) return;
+    const row = currentRow();
+    if (row && event.target.value.trim()) scheduleLocalSearch(card, row, event.target.value);
+  });
+
+  card.addEventListener('keydown', (event) => {
+    if (!event.target.matches('.sku-input') || event.key !== 'Enter') return;
+    event.preventDefault();
+    const box = card.querySelector('.sku-results');
+    const first = box?.querySelector('[data-result-index="0"]');
+    if (first) first.click();
+    else card.querySelector('[data-action="custom-entry"]')?.click();
+  });
+
+  card.addEventListener('click', (event) => {
+    const row = currentRow();
+    if (!row) return;
+
+    if (event.target.closest('[data-action="remove"]')) {
+      event.preventDefault();
+      event.stopPropagation();
+      const group = getRowGroup(row.id);
+      if (!group) return;
+      group.rows = (group.rows || []).filter(r => r.id !== row.id);
+      if (group.id === 'active' && !group.rows.length) group.rows.push(rowTemplate());
+      renderAll();
+      markBatchDirty();
+      showToast('Product removed.');
+      return;
+    }
+
+    if (event.target.closest('[data-action="use-compare"]')) {
+      if (row.compareLoading) return showToast('Compare Rate is still loading.');
+      if (row.compareRate === '' || row.compareRate === null || row.compareRate === undefined) return showToast('Compare Rate is Nil.');
+      row.rate = Math.trunc(Number(row.compareRate || 0));
+      const rateInput = card.querySelector('[data-field="rate"]');
+      if (rateInput) rateInput.value = String(row.rate);
+      const line = card.querySelector('[data-line-total]');
+      if (line) line.textContent = `৳${money(calcTotal(row))}`;
+      markBatchDirty();
+      showToast('Compare Rate copied to Rate.');
+      return;
+    }
+
+    const resultBtn = event.target.closest('[data-result-index]');
+    if (resultBtn) {
+      const box = resultBtn.closest('.sku-results');
+      const item = box?._results?.[Number(resultBtn.dataset.resultIndex)];
+      if (item) applyProduct(row, card, item);
+      return;
+    }
+
+    if (event.target.closest('[data-action="custom-entry"]')) {
+      applyCustomSku(row, card, card.querySelector('[data-field="sku"]')?.value || '');
+      return;
+    }
+
+    if (event.target.closest('[data-action="new-entry"]')) {
+      const input = card.querySelector('[data-field="sku"]');
+      input?.focus();
+      if (input?.value.trim()) applyCustomSku(row, card, input.value);
+      else showToast('Type the new SKU here, then press Enter.');
+      return;
+    }
+
+    if (event.target.closest('[data-action="preview"]')) {
+      if (!row.imageUrl) return showToast(row.sku ? 'No Shopify image for this SKU.' : 'Select a Shopify product first.');
+      state.previewRowId = row.id;
+      $('#previewImage').src = row.imageUrl;
+      $('#previewSku').textContent = `SKU: ${row.sku}`;
+      $('#previewTitle').textContent = row.productTitle || 'Product';
+      const priceToggle = $('#previewPriceToggle');
+      const hasPrice = !(row.price === '' || row.price === null || row.price === undefined);
+      priceToggle.dataset.price = hasPrice ? String(row.price) : '';
+      priceToggle.dataset.revealed = 'false';
+      priceToggle.setAttribute('aria-pressed', 'false');
+      priceToggle.setAttribute('aria-label', hasPrice ? 'Show sale price' : 'Sale price unavailable');
+      $('#previewPriceValue').textContent = hasPrice ? '••••••' : 'Not available';
+      $('#previewPriceEye').textContent = '👁';
+      $('#imageModal').classList.remove('hidden');
+    }
+  });
+}
 
 $('#previewPriceToggle').addEventListener('click', () => {
   const btn = $('#previewPriceToggle');
