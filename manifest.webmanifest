@@ -1,11 +1,11 @@
 {
-  "name": "Daily Purchase Entry",
+  "name": "Daily Purchase",
   "short_name": "Purchase",
-  "description": "Daily purchase entry with Shopify SKU search and Google Sheet push",
+  "description": "Fast Shopify purchase entry and Google Sheet sync",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#ffffff",
+  "background_color": "#f5f6f7",
   "theme_color": "#111214",
   "icons": [
     {"src":"./icons/icon-192.png","sizes":"192x192","type":"image/png"},

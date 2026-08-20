@@ -1,25 +1,39 @@
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => [...document.querySelectorAll(sel)];
+
 const state = {
-  rows: [],
-  searchTimers: new Map(),
-  activeSearches: new Map(),
-  toastTimer: null,
-  authenticated: false,
   backendUrl: '',
   pin: '',
-  shopifyConfigured: false,
-  sheetConfigured: false,
-  deferredInstallPrompt: null
+  date: '',
+  partyName: '',
+  rows: [],
+  parties: [],
+  catalog: [],
+  catalogMap: new Map(),
+  catalogReady: false,
+  catalogMeta: null,
+  searchTimers: new Map(),
+  searchCache: new Map(),
+  deferredInstallPrompt: null,
+  toastTimer: null,
+  batchSentAt: '',
+  batchNeedsUpdate: false,
+  syncing: false
 };
 
-const DRAFT_KEY = 'daily_purchase_github_v3_draft';
-const HISTORY_KEY = 'daily_purchase_github_v3_history';
-const BACKEND_KEY = 'daily_purchase_github_v3_backend';
-const PIN_SESSION_KEY = 'daily_purchase_github_v3_pin';
-const $ = (sel) => document.querySelector(sel);
-const rowsContainer = $('#rowsContainer');
-const emptyState = $('#emptyState');
-const saveStatus = $('#saveStatus');
-const lastSavedText = $('#lastSavedText');
+const KEYS = {
+  backend: 'daily_purchase_github_v3_backend',
+  pinSession: 'daily_purchase_github_v3_pin',
+  draft: 'daily_purchase_github_v4_draft',
+  history: 'daily_purchase_github_v4_history',
+  oldDraft: 'daily_purchase_github_v3_draft',
+  oldHistory: 'daily_purchase_github_v3_history',
+  catalogMeta: 'daily_purchase_v4_catalog_meta'
+};
+
+const DB_NAME = 'DailyPurchaseCatalogV4';
+const DB_VERSION = 1;
+const STORE_PRODUCTS = 'products';
 
 function uid() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -30,114 +44,52 @@ function todayISO() {
   const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
   return local.toISOString().slice(0, 10);
 }
-function newRow(copyParty = '') {
-  return {
-    id: uid(), date: todayISO(), partyName: copyParty, sku: '', qty: 1, rate: 0,
-    compareRate: 0, remarks: '', productTitle: '', variantTitle: '', imageUrl: '',
-    shopifyVariantId: '', isCustom: false, sheetRow: 0, sheetSentAt: '', sheetNeedsUpdate: false
-  };
+function money(n) {
+  return new Intl.NumberFormat('en-BD', { maximumFractionDigits: 2 }).format(Number(n || 0));
 }
-function money(n) { return new Intl.NumberFormat('en-BD', { maximumFractionDigits: 2 }).format(Number(n || 0)); }
 function escapeHtml(value = '') {
   return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
 }
-function meaningful(row) {
-  return Boolean(String(row.sku || '').trim() || String(row.partyName || '').trim() ||
-    String(row.remarks || '').trim() || Number(row.rate) || Number(row.compareRate));
-}
+function copySafe(value) { return String(value ?? '').replace(/[\t\r\n]+/g, ' ').trim(); }
 function calcTotal(row) { return Number(row.qty || 0) * Number(row.rate || 0); }
+function meaningful(row) { return Boolean(String(row.sku || '').trim() || Number(row.rate || 0) || String(row.remarks || '').trim()); }
 function cleanBackendUrl(value) {
   const v = String(value || '').trim();
   if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:\?.*)?$/i.test(v)) return '';
   return v.split('?')[0];
 }
-
-function saveDraftLocal() {
-  try {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ updatedAt: new Date().toISOString(), rows: state.rows }));
-    setSaveStatus('Saved on device', 'ok');
-    lastSavedText.textContent = `Saved ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-  } catch (_) { setSaveStatus('Save failed', 'bad'); }
-}
-function readDraftLocal() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
-    if (parsed && Array.isArray(parsed.rows)) return parsed;
-  } catch (_) {}
-  return null;
-}
-function readHistory() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (_) { return []; }
-}
-function writeHistory(items) {
-  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, 100))); } catch (_) {}
-}
-function archiveCurrent() {
-  const rows = state.rows.filter(meaningful).map(r => ({ ...r }));
-  if (!rows.length) return null;
-  const item = {
-    id: uid(), createdAt: new Date().toISOString(), rows,
-    rowCount: rows.length,
-    totalQty: rows.reduce((s, r) => s + Number(r.qty || 0), 0),
-    grandTotal: rows.reduce((s, r) => s + calcTotal(r), 0)
+function normalizeSku(value) { return String(value || '').trim().toUpperCase().replace(/\s+/g, ' '); }
+function compactSku(value) { return normalizeSku(value).replace(/[\s\-_/\\.]+/g, ''); }
+function rowTemplate() {
+  return {
+    id: uid(), sku: '', qty: 1, rate: '', compareRate: '', remarks: '',
+    productTitle: '', price: '', imageUrl: '', variantId: '', isCustom: false,
+    compareLoading: false, sheetRow: 0
   };
-  writeHistory([item, ...readHistory()]);
-  return item;
 }
 
-function renderAll() {
-  rowsContainer.innerHTML = '';
-  state.rows.forEach(row => rowsContainer.appendChild(renderRow(row)));
-  emptyState.classList.toggle('hidden', state.rows.length > 0);
-  updateSummary();
-}
-function renderRow(row) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'purchase-row purchase-grid';
-  wrapper.dataset.rowId = row.id;
-  wrapper.innerHTML = `
-    <div class="field field-date"><label class="field-label">Date</label><input class="input" type="date" data-field="date" value="${escapeHtml(row.date || todayISO())}" /></div>
-    <div class="field field-party"><label class="field-label">Party Name</label><input class="input" type="text" data-field="partyName" value="${escapeHtml(row.partyName || '')}" placeholder="Party name" autocomplete="off" /></div>
-    <div class="field field-sku"><label class="field-label">SKU</label><div class="sku-input-wrap">
-      <input class="input sku-input" type="text" data-field="sku" value="${escapeHtml(row.sku || '')}" placeholder="Search Shopify SKU" autocomplete="off" />
-      ${row.imageUrl ? `<button class="preview-btn" type="button" data-action="preview" title="View image"><img src="${escapeHtml(row.imageUrl)}" alt="" /></button>` : `<button class="preview-btn empty" type="button" data-action="preview" title="No image">▧</button>`}
-    </div><div class="sku-results hidden"></div></div>
-    <div class="field"><label class="field-label">Qnt</label><input class="input" type="number" min="0" step="1" data-field="qty" value="${Number(row.qty || 0)}" inputmode="numeric" /></div>
-    <div class="field"><label class="field-label">Rate</label><input class="input" type="number" min="0" step="0.01" data-field="rate" value="${Number(row.rate || 0)}" inputmode="decimal" /></div>
-    <div class="field"><label class="field-label">Total</label><div class="display-total" data-total>${money(calcTotal(row))}</div></div>
-    <div class="field"><label class="field-label">Compare Rate</label><input class="input" type="number" min="0" step="0.01" data-field="compareRate" value="${Number(row.compareRate || 0)}" inputmode="decimal" /></div>
-    <div class="field field-remarks"><label class="field-label">Remarks</label><textarea class="textarea" rows="1" data-field="remarks" placeholder="Remarks">${escapeHtml(row.remarks || '')}</textarea></div>
-    <div class="row-actions">
-      <button class="send-sheet-btn${row.sheetRow && !row.sheetNeedsUpdate ? ' sent' : ''}" type="button" data-action="send-sheet">${row.sheetRow ? (row.sheetNeedsUpdate ? '↻ Update Sheet' : `✓ Sent #${Number(row.sheetRow)}`) : '⇧ Send to Sheet'}</button>
-      <button class="icon-btn delete-row" type="button" data-action="delete">×</button>
-    </div>`;
-  return wrapper;
-}
-function updateSummary() {
-  const dataRows = state.rows.filter(meaningful);
-  $('#sumRows').textContent = dataRows.length;
-  $('#sumQty').textContent = money(dataRows.reduce((sum, r) => sum + Number(r.qty || 0), 0));
-  $('#sumTotal').textContent = `৳${money(dataRows.reduce((sum, r) => sum + calcTotal(r), 0))}`;
-}
-function getRow(rowId) { return state.rows.find(r => r.id === rowId); }
-function setSaveStatus(text, mode = 'ok') {
-  saveStatus.textContent = text;
-  saveStatus.style.color = mode === 'ok' ? '#18864b' : mode === 'warn' ? '#a15c00' : '#b42318';
-}
-function scheduleSave() { saveDraftLocal(); }
-function showToast(message) {
-  const toast = $('#toast'); toast.textContent = message; toast.classList.add('show');
-  clearTimeout(state.toastTimer); state.toastTimer = setTimeout(() => toast.classList.remove('show'), 2500);
-}
-function setChip(chip, textEl, ok, label, warning = false) {
-  chip.classList.remove('ok', 'bad', 'warn'); chip.classList.add(ok ? 'ok' : warning ? 'warn' : 'bad'); textEl.textContent = label;
+function getPartyName() {
+  const select = $('#partySelect');
+  if (select.value === '__new__') return $('#newPartyInput').value.trim();
+  return select.value.trim();
 }
 
-function jsonp(action, params = {}, timeoutMs = 20000) {
+function showToast(message, duration = 2600) {
+  const el = $('#toast');
+  el.textContent = message;
+  el.classList.add('show');
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => el.classList.remove('show'), duration);
+}
+
+function setCatalogNotice(text = '') {
+  const el = $('#catalogNotice');
+  el.textContent = text;
+  el.classList.toggle('hidden', !text);
+}
+
+function jsonp(action, params = {}, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     if (!state.backendUrl) return reject(new Error('Backend URL is not configured.'));
     const callback = `__purchase_cb_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -150,257 +102,750 @@ function jsonp(action, params = {}, timeoutMs = 20000) {
     const script = document.createElement('script');
     let timer;
     const cleanup = () => { clearTimeout(timer); delete window[callback]; script.remove(); };
-    window[callback] = data => { cleanup(); resolve(data); };
+    window[callback] = (data) => { cleanup(); resolve(data); };
     script.onerror = () => { cleanup(); reject(new Error('Could not reach Apps Script.')); };
     timer = setTimeout(() => { cleanup(); reject(new Error('Request timed out.')); }, timeoutMs);
-    script.src = url.toString(); document.head.appendChild(script);
+    script.src = url.toString();
+    document.head.appendChild(script);
   });
 }
 
-async function checkBackend() {
-  if (!state.backendUrl || !navigator.onLine) return null;
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE_PRODUCTS)) db.createObjectStore(STORE_PRODUCTS, { keyPath: 'id' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDB could not open.'));
+  });
+}
+async function idbGetAll() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_PRODUCTS, 'readonly');
+    const req = tx.objectStore(STORE_PRODUCTS).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbClear() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_PRODUCTS, 'readwrite');
+    tx.objectStore(STORE_PRODUCTS).clear();
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbPutMany(items) {
+  if (!items.length) return;
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_PRODUCTS, 'readwrite');
+    const store = tx.objectStore(STORE_PRODUCTS);
+    items.forEach(item => store.put(item));
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function readCatalogLocalMeta() {
+  try { return JSON.parse(localStorage.getItem(KEYS.catalogMeta) || 'null') || {}; }
+  catch (_) { return {}; }
+}
+function writeCatalogLocalMeta(meta) {
+  localStorage.setItem(KEYS.catalogMeta, JSON.stringify(meta || {}));
+}
+function rebuildCatalogIndexes(items) {
+  state.catalog = (items || []).filter(x => x && x.id && x.sku);
+  state.catalogMap = new Map(state.catalog.map(x => [x.id, x]));
+  state.catalogReady = state.catalog.length > 0;
+  state.searchCache.clear();
+  $('#catalogCountText').textContent = state.catalog.length ? money(state.catalog.length) : '0';
+}
+
+function rankProduct(product, queryNorm, queryCompact) {
+  const skuNorm = product.norm || normalizeSku(product.sku);
+  const skuCompact = product.compact || compactSku(product.sku);
+  if (skuNorm === queryNorm) return 0;
+  if (skuCompact === queryCompact) return 1;
+  if (skuNorm.startsWith(queryNorm)) return 2;
+  if (skuCompact.startsWith(queryCompact)) return 3;
+  if (skuNorm.includes(queryNorm)) return 4;
+  if (skuCompact.includes(queryCompact)) return 5;
+  const qTokens = queryNorm.split(' ').filter(Boolean);
+  if (qTokens.length > 1 && qTokens.every(t => skuNorm.includes(t))) return 6;
+  return 99;
+}
+function searchLocalCatalog(query) {
+  const qNorm = normalizeSku(query);
+  const qCompact = compactSku(query);
+  if (!qNorm) return [];
+  const cacheKey = `${qNorm}|${qCompact}`;
+  if (state.searchCache.has(cacheKey)) return state.searchCache.get(cacheKey);
+  const ranked = [];
+  for (const product of state.catalog) {
+    const rank = rankProduct(product, qNorm, qCompact);
+    if (rank < 99) ranked.push({ product, rank });
+  }
+  ranked.sort((a, b) => a.rank - b.rank || String(a.product.sku).localeCompare(String(b.product.sku), undefined, { numeric: true, sensitivity: 'base' }));
+  const result = ranked.slice(0, 30).map(x => x.product);
+  state.searchCache.set(cacheKey, result);
+  if (state.searchCache.size > 100) state.searchCache.delete(state.searchCache.keys().next().value);
+  return result;
+}
+
+async function loadCatalogFromDevice() {
   try {
-    const json = await jsonp('ping');
-    state.shopifyConfigured = Boolean(json.shopifyConfigured);
-    state.sheetConfigured = Boolean(json.sheetConfigured);
-    setChip($('#shopifyChip'), $('#shopifyText'), state.shopifyConfigured, state.shopifyConfigured ? 'Shopify Connected' : 'Shopify Setup Needed');
-    setChip($('#sheetChip'), $('#sheetText'), state.sheetConfigured, state.sheetConfigured ? 'Google Sheet Ready' : 'Sheet Setup Needed');
-    setChip($('#cloudChip'), $('#cloudText'), true, 'Device Saved');
-    return json;
-  } catch (_) {
-    setChip($('#shopifyChip'), $('#shopifyText'), false, 'Backend Offline');
-    setChip($('#sheetChip'), $('#sheetText'), false, 'Backend Offline');
-    setChip($('#cloudChip'), $('#cloudText'), true, 'Device Saved');
-    return null;
+    const items = await idbGetAll();
+    rebuildCatalogIndexes(items);
+    if (items.length) setCatalogNotice('');
+  } catch (err) {
+    console.warn(err);
+    setCatalogNotice('Local product index could not be opened. Search may be unavailable until refreshed.');
   }
 }
 
-function closeAllSearches(except = null) {
-  document.querySelectorAll('.sku-results').forEach(el => { if (el !== except) el.classList.add('hidden'); });
+async function fetchCatalogPages(action, params, pageSize = 700) {
+  let offset = 0;
+  const all = [];
+  while (true) {
+    const res = await jsonp(action, { pin: state.pin, ...params, offset, limit: pageSize }, 45000);
+    if (!res.ok) throw new Error(res.error || 'Catalog download failed.');
+    const items = Array.isArray(res.items) ? res.items : [];
+    all.push(...items);
+    offset += items.length;
+    if (!res.hasMore || !items.length) break;
+  }
+  return all;
 }
-async function searchSku(rowEl, row, query) {
-  const resultsBox = rowEl.querySelector('.sku-results');
-  if (!query.trim()) return resultsBox.classList.add('hidden');
-  closeAllSearches(resultsBox); resultsBox.classList.remove('hidden');
-  resultsBox.innerHTML = '<div class="search-state">Searching Shopify…</div>';
-  const searchId = uid(); state.activeSearches.set(row.id, searchId);
+
+async function refreshLocalCatalog({ forceMeta = false } = {}) {
+  if (!navigator.onLine || !state.pin) return;
   try {
-    if (!navigator.onLine) throw new Error('Offline');
-    const json = await jsonp('search', { pin: state.pin, q: query.trim() });
-    if (state.activeSearches.get(row.id) !== searchId) return;
-    if (!json.ok) throw new Error(json.error || 'Shopify search error');
-    const raw = Array.isArray(json.products) ? json.products : [];
-    const needle = query.trim().toUpperCase().replace(/\s+/g, ' ');
-    const results = raw.map(item => ({
-      id: item.id || '', sku: item.sku || '', productTitle: item.title || '', variantTitle: item.variantTitle || '',
-      price: item.price ?? '', imageUrl: item.image || '',
-      isExactMatch: String(item.sku || '').trim().toUpperCase().replace(/\s+/g, ' ') === needle
-    }));
-    const options = results.map((item, index) => `
-      <div class="sku-option${item.isExactMatch ? ' exact' : ''}" tabindex="0" data-result-index="${index}">
-        ${item.imageUrl ? `<img class="sku-thumb" src="${escapeHtml(item.imageUrl)}" alt="" loading="lazy" />` : `<div class="sku-thumb sku-thumb-placeholder">▧</div>`}
-        <div class="sku-option-copy"><div class="sku-option-title">${escapeHtml(item.productTitle || item.sku)}${item.isExactMatch ? '<span class="exact-badge">Exact</span>' : ''}</div>
-        <div class="sku-option-meta">${escapeHtml(item.sku)}${item.variantTitle && item.variantTitle !== 'Default Title' ? ` • ${escapeHtml(item.variantTitle)}` : ''}</div></div>
-        <div class="sku-price">${item.price !== '' ? `৳${escapeHtml(item.price)}` : ''}</div>
-      </div>`).join('');
-    resultsBox.innerHTML = `${options || '<div class="search-state">No Shopify SKU match found.</div>'}<div class="custom-option" data-custom-sku="${escapeHtml(query)}">Use custom SKU: <span>${escapeHtml(query)}</span></div>`;
-    resultsBox._results = results;
-  } catch (e) {
-    resultsBox.innerHTML = `<div class="search-state">${escapeHtml(e.message || 'Could not reach Shopify.')}</div><div class="custom-option" data-custom-sku="${escapeHtml(query)}">Use custom SKU: <span>${escapeHtml(query)}</span></div>`;
+    const serverMeta = await jsonp('catalogMeta', { pin: state.pin }, 30000);
+    if (!serverMeta.ok) throw new Error(serverMeta.error || 'Could not read catalog status.');
+    state.catalogMeta = serverMeta;
+    updateSyncUi(serverMeta);
+
+    if (serverMeta.syncing) {
+      setCatalogNotice('Shopify catalog is being prepared. Existing local search is still available.');
+      return;
+    }
+    if (!Number(serverMeta.count || 0)) {
+      setCatalogNotice('Shopify catalog cache is empty. Run the first Full Sync from Apps Script, then reopen the app.');
+      return;
+    }
+
+    const localMeta = readCatalogLocalMeta();
+    const generationChanged = !localMeta.generation || localMeta.generation !== serverMeta.generation;
+    const noLocal = !state.catalog.length;
+
+    if (generationChanged || noLocal) {
+      setSyncStatus('Downloading product catalog…');
+      const items = await fetchCatalogPages('catalogPage', { generation: serverMeta.generation });
+      await idbClear();
+      await idbPutMany(items);
+      rebuildCatalogIndexes(items);
+      writeCatalogLocalMeta({ generation: serverMeta.generation, version: Number(serverMeta.version || 0), syncedAt: new Date().toISOString() });
+      setCatalogNotice('');
+      setSyncStatus('Products updated successfully');
+      return;
+    }
+
+    if (Number(serverMeta.version || 0) > Number(localMeta.version || 0)) {
+      setSyncStatus('Applying latest product updates…');
+      const changes = await fetchCatalogPages('catalogDelta', { sinceVersion: Number(localMeta.version || 0) });
+      await idbPutMany(changes);
+      changes.forEach(item => state.catalogMap.set(item.id, item));
+      rebuildCatalogIndexes([...state.catalogMap.values()]);
+      writeCatalogLocalMeta({ generation: serverMeta.generation, version: Number(serverMeta.version || 0), syncedAt: new Date().toISOString() });
+      setSyncStatus(`Updated ${changes.length} product${changes.length === 1 ? '' : 's'}`);
+    } else if (forceMeta) {
+      setSyncStatus('Products are up to date');
+    }
+  } catch (err) {
+    console.warn(err);
+    setSyncStatus(err.message || 'Catalog update failed');
+    if (!state.catalog.length) setCatalogNotice('Product catalog is not available yet. Open the side menu and check sync setup.');
   }
 }
-function applyShopifyResult(rowEl, row, item) {
-  row.sku = item.sku || row.sku; row.productTitle = item.productTitle || ''; row.variantTitle = item.variantTitle || '';
-  row.imageUrl = item.imageUrl || ''; row.shopifyVariantId = item.id || ''; row.isCustom = false;
-  rowEl.querySelector('[data-field="sku"]').value = row.sku;
-  const oldPreview = rowEl.querySelector('[data-action="preview"]');
-  const replacement = document.createElement('button'); replacement.type = 'button'; replacement.dataset.action = 'preview';
-  replacement.className = `preview-btn${row.imageUrl ? '' : ' empty'}`; replacement.innerHTML = row.imageUrl ? `<img src="${escapeHtml(row.imageUrl)}" alt="" />` : '▧';
-  oldPreview.replaceWith(replacement); rowEl.querySelector('.sku-results').classList.add('hidden');
-  markSheetDirty(rowEl, row); scheduleSave(); showToast(`Selected ${row.sku}`);
+
+function setSyncStatus(text) { $('#syncStatusText').textContent = text; }
+function updateSyncUi(meta = {}) {
+  const sync = meta.lastSync ? new Date(meta.lastSync) : null;
+  $('#lastSyncText').textContent = sync && !Number.isNaN(sync.getTime()) ? sync.toLocaleString() : 'Never';
+  $('#catalogCountText').textContent = money(Number(meta.count || state.catalog.length || 0));
+  if (meta.syncing) setSyncStatus('Updating products…');
 }
-function refreshSheetButton(rowEl, row) {
-  const btn = rowEl.querySelector('[data-action="send-sheet"]'); if (!btn) return;
-  btn.classList.toggle('sent', Boolean(row.sheetRow && !row.sheetNeedsUpdate)); btn.disabled = false;
-  btn.textContent = row.sheetRow ? (row.sheetNeedsUpdate ? '↻ Update Sheet' : `✓ Sent #${Number(row.sheetRow)}`) : '⇧ Send to Sheet';
+
+function saveDraft() {
+  state.partyName = getPartyName();
+  const draft = {
+    updatedAt: new Date().toISOString(), date: state.date, partyName: state.partyName,
+    rows: state.rows, batchSentAt: state.batchSentAt, batchNeedsUpdate: state.batchNeedsUpdate
+  };
+  try { localStorage.setItem(KEYS.draft, JSON.stringify(draft)); } catch (_) {}
 }
-function markSheetDirty(rowEl, row) { if (row.sheetRow) row.sheetNeedsUpdate = true; refreshSheetButton(rowEl, row); }
-function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-async function sendRowToSheet(rowEl, row) {
-  if (!navigator.onLine) return showToast('Internet is required to send to Google Sheet.');
-  if (!String(row.sku || '').trim()) return showToast('Enter or select an SKU first.');
-  const btn = rowEl.querySelector('[data-action="send-sheet"]'); const oldText = btn?.textContent || '';
-  if (btn) { btn.disabled = true; btn.textContent = row.sheetRow ? 'Updating…' : 'Sending…'; }
+function migrateOldDraft() {
   try {
-    // Write by POST (not JSONP). JSONP below is only used for read-only confirmation.
+    const old = JSON.parse(localStorage.getItem(KEYS.oldDraft) || 'null');
+    if (!old || !Array.isArray(old.rows) || !old.rows.length) return null;
+    const first = old.rows[0] || {};
+    return {
+      date: first.date || todayISO(), partyName: first.partyName || '', batchSentAt: '', batchNeedsUpdate: false,
+      rows: old.rows.map(r => ({
+        ...rowTemplate(), id: r.id || uid(), sku: r.sku || '', qty: Number(r.qty || 1), rate: r.rate === 0 ? '' : (r.rate ?? ''),
+        compareRate: r.compareRate === 0 ? '' : (r.compareRate ?? ''), remarks: r.remarks || '', productTitle: r.productTitle || '',
+        price: r.price || '', imageUrl: r.imageUrl || '', variantId: r.shopifyVariantId || '', isCustom: Boolean(r.isCustom), sheetRow: Number(r.sheetRow || 0)
+      }))
+    };
+  } catch (_) { return null; }
+}
+function readDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem(KEYS.draft) || 'null');
+    if (d && Array.isArray(d.rows)) return d;
+  } catch (_) {}
+  return migrateOldDraft();
+}
+function readHistory() {
+  try {
+    const h = JSON.parse(localStorage.getItem(KEYS.history) || '[]');
+    if (Array.isArray(h)) return h;
+  } catch (_) {}
+  return [];
+}
+function writeHistory(items) {
+  try { localStorage.setItem(KEYS.history, JSON.stringify(items.slice(0, 100))); } catch (_) {}
+}
+function currentBatchSnapshot() {
+  const rows = state.rows.filter(meaningful).map(r => ({ ...r }));
+  if (!rows.length) return null;
+  return {
+    id: uid(), createdAt: new Date().toISOString(), date: state.date, partyName: getPartyName(), rows,
+    totalQty: rows.reduce((s, r) => s + Number(r.qty || 0), 0),
+    totalAmount: rows.reduce((s, r) => s + calcTotal(r), 0)
+  };
+}
+function archiveCurrent() {
+  const snapshot = currentBatchSnapshot();
+  if (!snapshot) return null;
+  writeHistory([snapshot, ...readHistory()]);
+  return snapshot;
+}
+
+function renderPartySelect() {
+  const select = $('#partySelect');
+  const current = state.partyName || '';
+  const unique = [...new Set(state.parties.map(x => String(x || '').trim()).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  select.innerHTML = '<option value="">Select Party</option><option value="__new__">+ New Party</option>' +
+    unique.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+  const hasExisting = unique.includes(current);
+  if (current && hasExisting) {
+    select.value = current;
+    $('#newPartyInput').classList.add('hidden');
+  } else if (current) {
+    select.value = '__new__';
+    $('#newPartyInput').value = current;
+    $('#newPartyInput').classList.remove('hidden');
+  } else {
+    select.value = '';
+    $('#newPartyInput').classList.add('hidden');
+  }
+}
+
+async function loadReferenceData() {
+  if (!navigator.onLine) return;
+  try {
+    const res = await jsonp('referenceData', { pin: state.pin }, 30000);
+    if (!res.ok) throw new Error(res.error || 'Could not load party list.');
+    state.parties = Array.isArray(res.parties) ? res.parties : [];
+    renderPartySelect();
+  } catch (err) {
+    console.warn(err);
+    state.parties = [];
+    renderPartySelect();
+  }
+}
+
+function renderAll() {
+  const container = $('#productsContainer');
+  container.innerHTML = '';
+  state.rows.forEach((row, index) => container.appendChild(renderProductCard(row, index)));
+  $('#emptyState').classList.toggle('hidden', state.rows.length > 0);
+  updateSummary();
+}
+
+function renderProductCard(row, index) {
+  const card = document.createElement('article');
+  card.className = 'product-card';
+  card.dataset.rowId = row.id;
+  const compareText = row.compareLoading ? 'Loading…' : (row.compareRate === '' || row.compareRate === null || row.compareRate === undefined ? '—' : `৳${money(row.compareRate)}`);
+  card.innerHTML = `
+    <div class="product-card-head">
+      <div class="product-number">PRODUCT ${index + 1}</div>
+      <button class="remove-product" type="button" data-action="remove" aria-label="Remove product">×</button>
+    </div>
+    <div class="product-grid">
+      <div class="field sku-field">
+        <div class="sku-label-row"><label class="label">SKU Search</label><button class="new-entry-btn" type="button" data-action="new-entry">＋ New Entry</button></div>
+        <div class="sku-control">
+          <input class="input sku-input" data-field="sku" type="text" autocomplete="off" value="${escapeHtml(row.sku || '')}" placeholder="Type SKU" />
+          <button class="product-thumb-button" type="button" data-action="preview" aria-label="Product preview">${row.imageUrl ? `<img src="${escapeHtml(row.imageUrl)}" alt="" />` : '▧'}</button>
+        </div>
+        <div class="sku-results hidden"></div>
+      </div>
+      <div class="field qty-field"><label class="label">Quantity</label><input class="input" data-field="qty" type="number" min="0" step="1" inputmode="numeric" value="${Number(row.qty || 0)}" /></div>
+      <div class="field rate-field"><label class="label">Rate</label><input class="input" data-field="rate" type="number" min="0" step="0.01" inputmode="decimal" value="${row.rate === '' || row.rate === null || row.rate === undefined ? '' : Number(row.rate)}" placeholder="Rate" /></div>
+      <div class="field compare-field"><label class="label">Compare Rate</label><div class="compare-box${row.compareLoading ? ' loading' : ''}" data-compare>${compareText}</div></div>
+      <div class="field remarks-field"><label class="label">Remarks</label><textarea class="textarea" data-field="remarks" rows="1" placeholder="Remarks">${escapeHtml(row.remarks || '')}</textarea></div>
+    </div>
+    <div class="line-total"><span>Line Total</span><strong data-line-total>৳${money(calcTotal(row))}</strong></div>`;
+  return card;
+}
+
+function updateSummary() {
+  const rows = state.rows.filter(meaningful);
+  const qty = rows.reduce((sum, r) => sum + Number(r.qty || 0), 0);
+  const total = rows.reduce((sum, r) => sum + calcTotal(r), 0);
+  $('#totalQty').textContent = money(qty);
+  $('#totalAmount').textContent = `৳${money(total)}`;
+  $('#grandTotalTop').textContent = `৳${money(total)}`;
+  const send = $('#sendBatchBtn');
+  if (state.batchSentAt && !state.batchNeedsUpdate) send.textContent = '✓ Sent to Sheet';
+  else if (state.batchSentAt && state.batchNeedsUpdate) send.textContent = 'Update Sheet';
+  else send.textContent = 'Send to Sheet';
+}
+function markBatchDirty() {
+  if (state.batchSentAt) state.batchNeedsUpdate = true;
+  saveDraft();
+  updateSummary();
+}
+function getRow(id) { return state.rows.find(r => r.id === id); }
+
+function closeSearches(except = null) {
+  $$('.sku-results').forEach(el => { if (el !== except) el.classList.add('hidden'); });
+}
+function renderSearchResults(card, row, query) {
+  const box = card.querySelector('.sku-results');
+  const results = searchLocalCatalog(query);
+  box._results = results;
+  const html = results.map((item, index) => `
+    <button class="sku-result" type="button" data-result-index="${index}">
+      ${item.imageUrl ? `<img class="sku-result-thumb" src="${escapeHtml(item.imageUrl)}" alt="" loading="lazy" />` : '<span class="sku-result-thumb sku-result-placeholder">▧</span>'}
+      <span class="sku-result-sku">${escapeHtml(item.sku)}</span>
+    </button>`).join('');
+  box.innerHTML = `${html || '<div class="search-empty">No matching SKU found.</div>'}<div class="custom-search-action" data-action="custom-entry">＋ New Entry: ${escapeHtml(query)}</div>`;
+  box.classList.remove('hidden');
+}
+
+function scheduleLocalSearch(card, row, query) {
+  clearTimeout(state.searchTimers.get(row.id));
+  state.searchTimers.set(row.id, setTimeout(() => {
+    const clean = String(query || '').trim();
+    if (!clean) return card.querySelector('.sku-results').classList.add('hidden');
+    closeSearches(card.querySelector('.sku-results'));
+    if (!state.catalogReady) {
+      const box = card.querySelector('.sku-results');
+      box.innerHTML = `<div class="search-empty">Product catalog is not ready yet.</div><div class="custom-search-action" data-action="custom-entry">＋ New Entry: ${escapeHtml(clean)}</div>`;
+      box.classList.remove('hidden');
+      return;
+    }
+    renderSearchResults(card, row, clean);
+  }, 65));
+}
+
+async function loadCompareRate(row, card) {
+  const sku = String(row.sku || '').trim();
+  if (!sku || row.isCustom && !navigator.onLine) return;
+  row.compareLoading = true;
+  const box = card?.querySelector('[data-compare]');
+  if (box) { box.textContent = 'Loading…'; box.classList.add('loading'); }
+  try {
+    if (!navigator.onLine) throw new Error('offline');
+    const res = await jsonp('compareRate', { pin: state.pin, sku }, 25000);
+    if (!res.ok) throw new Error(res.error || 'Compare rate lookup failed.');
+    if (row.sku !== sku) return;
+    row.compareRate = res.rate === null || res.rate === undefined || res.rate === '' ? '' : Number(res.rate);
+  } catch (_) {
+    if (row.sku === sku) row.compareRate = '';
+  } finally {
+    row.compareLoading = false;
+    const currentCard = document.querySelector(`[data-row-id="${row.id}"]`);
+    const currentBox = currentCard?.querySelector('[data-compare]');
+    if (currentBox) {
+      currentBox.classList.remove('loading');
+      currentBox.textContent = row.compareRate === '' ? '—' : `৳${money(row.compareRate)}`;
+    }
+    saveDraft();
+  }
+}
+
+function applyProduct(row, card, item) {
+  row.sku = item.sku || '';
+  row.productTitle = item.title || '';
+  row.price = item.price ?? '';
+  row.imageUrl = item.imageUrl || '';
+  row.variantId = item.id || '';
+  row.isCustom = false;
+  const input = card.querySelector('[data-field="sku"]');
+  input.value = row.sku;
+  const thumb = card.querySelector('[data-action="preview"]');
+  thumb.innerHTML = row.imageUrl ? `<img src="${escapeHtml(row.imageUrl)}" alt="" />` : '▧';
+  card.querySelector('.sku-results').classList.add('hidden');
+  markBatchDirty();
+  loadCompareRate(row, card);
+}
+function applyCustomSku(row, card, sku) {
+  row.sku = String(sku || '').trim();
+  row.productTitle = '';
+  row.price = '';
+  row.imageUrl = '';
+  row.variantId = '';
+  row.isCustom = true;
+  card.querySelector('[data-field="sku"]').value = row.sku;
+  card.querySelector('[data-action="preview"]').innerHTML = '▧';
+  card.querySelector('.sku-results').classList.add('hidden');
+  markBatchDirty();
+  loadCompareRate(row, card);
+}
+
+$('#productsContainer').addEventListener('input', (event) => {
+  const field = event.target.closest('[data-field]');
+  if (!field) return;
+  const card = event.target.closest('.product-card');
+  const row = card ? getRow(card.dataset.rowId) : null;
+  if (!row) return;
+  const name = field.dataset.field;
+  if (name === 'qty') row.qty = Number(field.value || 0);
+  else if (name === 'rate') row.rate = field.value === '' ? '' : Number(field.value);
+  else row[name] = field.value;
+
+  if (name === 'sku') {
+    row.productTitle = ''; row.price = ''; row.imageUrl = ''; row.variantId = ''; row.isCustom = true; row.compareRate = '';
+    card.querySelector('[data-action="preview"]').innerHTML = '▧';
+    card.querySelector('[data-compare]').textContent = '—';
+    scheduleLocalSearch(card, row, field.value);
+  }
+  if (name === 'qty' || name === 'rate') card.querySelector('[data-line-total]').textContent = `৳${money(calcTotal(row))}`;
+  markBatchDirty();
+});
+
+$('#productsContainer').addEventListener('focusin', (event) => {
+  if (!event.target.matches('.sku-input')) return;
+  const card = event.target.closest('.product-card');
+  const row = getRow(card.dataset.rowId);
+  if (row && event.target.value.trim()) scheduleLocalSearch(card, row, event.target.value);
+});
+
+$('#productsContainer').addEventListener('keydown', (event) => {
+  if (!event.target.matches('.sku-input') || event.key !== 'Enter') return;
+  event.preventDefault();
+  const card = event.target.closest('.product-card');
+  const box = card.querySelector('.sku-results');
+  const first = box.querySelector('[data-result-index="0"]');
+  if (first) first.click();
+  else card.querySelector('[data-action="custom-entry"]')?.click();
+});
+
+$('#productsContainer').addEventListener('click', (event) => {
+  const card = event.target.closest('.product-card');
+  if (!card) return;
+  const row = getRow(card.dataset.rowId);
+  if (!row) return;
+
+  const resultBtn = event.target.closest('[data-result-index]');
+  if (resultBtn) {
+    const box = resultBtn.closest('.sku-results');
+    const item = box?._results?.[Number(resultBtn.dataset.resultIndex)];
+    if (item) applyProduct(row, card, item);
+    return;
+  }
+  if (event.target.closest('[data-action="custom-entry"]')) {
+    applyCustomSku(row, card, card.querySelector('[data-field="sku"]').value);
+    return;
+  }
+  if (event.target.closest('[data-action="new-entry"]')) {
+    const input = card.querySelector('[data-field="sku"]');
+    input.focus();
+    if (input.value.trim()) applyCustomSku(row, card, input.value);
+    else showToast('Type the new SKU here, then press Enter.');
+    return;
+  }
+  if (event.target.closest('[data-action="remove"]')) {
+    state.rows = state.rows.filter(r => r.id !== row.id);
+    if (!state.rows.length) state.rows.push(rowTemplate());
+    renderAll(); markBatchDirty();
+    return;
+  }
+  if (event.target.closest('[data-action="preview"]')) {
+    if (!row.imageUrl) return showToast(row.sku ? 'No Shopify image for this SKU.' : 'Select a Shopify product first.');
+    $('#previewImage').src = row.imageUrl;
+    $('#previewSku').textContent = `SKU: ${row.sku}`;
+    $('#previewTitle').textContent = row.productTitle || 'Product';
+    $('#previewPrice').textContent = row.price === '' || row.price === null || row.price === undefined ? '' : `Price: ৳${money(row.price)}`;
+    $('#imageModal').classList.remove('hidden');
+  }
+});
+
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('.sku-field')) closeSearches();
+  const close = event.target.closest('[data-close-modal]');
+  if (close) $('#'+(close.dataset.closeModal === 'image' ? 'imageModal' : 'historyModal')).classList.add('hidden');
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  closeSearches();
+  $('#imageModal').classList.add('hidden');
+  $('#historyModal').classList.add('hidden');
+  closeDrawer();
+});
+
+function addProduct(focus = true) {
+  const row = rowTemplate();
+  state.rows.push(row);
+  const card = renderProductCard(row, state.rows.length - 1);
+  $('#productsContainer').appendChild(card);
+  $('#emptyState').classList.add('hidden');
+  updateSummary(); markBatchDirty();
+  if (focus) setTimeout(() => card.querySelector('.sku-input')?.focus(), 40);
+}
+$('#addProductBtn').addEventListener('click', () => addProduct());
+$('#addAnotherBtn').addEventListener('click', () => addProduct());
+
+$('#purchaseDate').addEventListener('change', () => { state.date = $('#purchaseDate').value || todayISO(); markBatchDirty(); });
+$('#partySelect').addEventListener('change', () => {
+  const isNew = $('#partySelect').value === '__new__';
+  $('#newPartyInput').classList.toggle('hidden', !isNew);
+  if (isNew) setTimeout(() => $('#newPartyInput').focus(), 20);
+  state.partyName = getPartyName(); markBatchDirty();
+});
+$('#newPartyInput').addEventListener('input', () => { state.partyName = getPartyName(); markBatchDirty(); });
+
+async function sendBatchToSheet() {
+  const party = getPartyName();
+  const rows = state.rows.filter(meaningful);
+  if (!party) return showToast('Select or enter a Party Name.');
+  if (!rows.length) return showToast('Add at least one product.');
+  if (rows.some(r => !String(r.sku || '').trim())) return showToast('Every product needs an SKU.');
+  if (!navigator.onLine) return showToast('Internet is required to send to Google Sheet.');
+
+  const btn = $('#sendBatchBtn');
+  const oldText = btn.textContent;
+  btn.disabled = true; btn.textContent = state.batchSentAt ? 'Updating…' : 'Sending…';
+  try {
+    const payloadRows = rows.map(r => ({
+      entryId: r.id, sku: r.sku, qty: Number(r.qty || 0), rate: Number(r.rate || 0), remarks: r.remarks || ''
+    }));
     const form = new URLSearchParams({
-      action: 'sendToSheet', pin: state.pin, entryId: row.id,
-      sheetRow: String(Number(row.sheetRow || 0)), date: row.date || '', partyName: row.partyName || '', sku: row.sku || '',
-      qty: String(Number(row.qty || 0)), rate: String(Number(row.rate || 0)), remarks: row.remarks || ''
+      action: 'sendBatchToSheet', pin: state.pin, date: state.date || todayISO(), partyName: party,
+      itemsJson: JSON.stringify(payloadRows)
     });
     await fetch(state.backendUrl, { method: 'POST', mode: 'no-cors', body: form });
 
-    let confirmedRow = 0;
-    for (let attempt = 0; attempt < 6 && !confirmedRow; attempt++) {
-      await wait(attempt === 0 ? 450 : 650);
-      const check = await jsonp('checkSheetEntry', { pin: state.pin, entryId: row.id });
-      if (check.ok && Number(check.row || 0) > 0) confirmedRow = Number(check.row);
+    let confirmed = null;
+    for (let attempt = 0; attempt < 9 && !confirmed; attempt++) {
+      await new Promise(r => setTimeout(r, attempt === 0 ? 500 : 700));
+      const check = await jsonp('checkBatchEntries', { pin: state.pin, entryIds: rows.map(r => r.id).join(',') }, 25000);
+      if (check.ok && Number(check.found || 0) === rows.length) confirmed = check;
     }
-    if (!confirmedRow) throw new Error('Google Sheet did not confirm the row. Please try again.');
-
-    row.sheetRow = confirmedRow; row.sheetSentAt = new Date().toISOString(); row.sheetNeedsUpdate = false;
-    refreshSheetButton(rowEl, row); scheduleSave(); showToast(`Sent to Google Sheet row ${row.sheetRow}.`);
-  } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = oldText; }
-    showToast(e.message || 'Could not send to Google Sheet.');
+    if (!confirmed) throw new Error('Google Sheet did not confirm all products. Please try again.');
+    const rowMap = confirmed.rows || {};
+    rows.forEach(r => { r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0); });
+    state.batchSentAt = new Date().toISOString();
+    state.batchNeedsUpdate = false;
+    archiveCurrent();
+    saveDraft(); updateSummary();
+    showToast(`${rows.length} product${rows.length === 1 ? '' : 's'} sent to Google Sheet.`);
+  } catch (err) {
+    showToast(err.message || 'Could not send to Google Sheet.', 3600);
+  } finally {
+    btn.disabled = false;
+    if (!state.batchSentAt) btn.textContent = oldText;
+    updateSummary();
   }
 }
+$('#sendBatchBtn').addEventListener('click', sendBatchToSheet);
 
-rowsContainer.addEventListener('input', event => {
-  const input = event.target.closest('[data-field]'); if (!input) return;
-  const rowEl = event.target.closest('.purchase-row'); const row = rowEl ? getRow(rowEl.dataset.rowId) : null; if (!row) return;
-  const field = input.dataset.field; let value = input.value; if (['qty', 'rate', 'compareRate'].includes(field)) value = Number(value || 0); row[field] = value;
-  markSheetDirty(rowEl, row);
-  if (field === 'qty' || field === 'rate') { rowEl.querySelector('[data-total]').textContent = money(calcTotal(row)); updateSummary(); }
-  if (field === 'sku') {
-    row.productTitle = ''; row.variantTitle = ''; row.imageUrl = ''; row.shopifyVariantId = ''; row.isCustom = true;
-    const preview = rowEl.querySelector('[data-action="preview"]'); preview.className = 'preview-btn empty'; preview.innerHTML = '▧';
-    clearTimeout(state.searchTimers.get(row.id)); const typed = String(value || '');
-    state.searchTimers.set(row.id, setTimeout(() => searchSku(rowEl, row, typed), 320));
-  }
-  if (['partyName', 'remarks', 'date'].includes(field)) updateSummary(); scheduleSave();
-});
-rowsContainer.addEventListener('focusin', event => {
-  if (!event.target.matches('.sku-input')) return; const rowEl = event.target.closest('.purchase-row'); const row = getRow(rowEl.dataset.rowId);
-  if (row && event.target.value.trim()) searchSku(rowEl, row, event.target.value);
-});
-rowsContainer.addEventListener('click', event => {
-  const rowEl = event.target.closest('.purchase-row'); if (!rowEl) return; const row = getRow(rowEl.dataset.rowId); if (!row) return;
-  if (event.target.closest('[data-action="send-sheet"]')) return sendRowToSheet(rowEl, row);
-  if (event.target.closest('[data-action="delete"]')) { state.rows = state.rows.filter(r => r.id !== row.id); renderAll(); scheduleSave(); return; }
-  if (event.target.closest('[data-action="preview"]')) {
-    if (!row.imageUrl) return showToast(row.sku ? 'This SKU has no Shopify image.' : 'Select a Shopify SKU first.');
-    $('#imagePreview').src = row.imageUrl; $('#imageTitle').textContent = row.productTitle || row.variantTitle || 'Product';
-    $('#imageSku').textContent = `SKU: ${row.sku}${row.variantTitle && row.variantTitle !== 'Default Title' ? ` • ${row.variantTitle}` : ''}`;
-    $('#imageModal').classList.remove('hidden'); return;
-  }
-  const option = event.target.closest('[data-result-index]');
-  if (option) { const box = option.closest('.sku-results'); const item = box?._results?.[Number(option.dataset.resultIndex)]; if (item) applyShopifyResult(rowEl, row, item); return; }
-  const custom = event.target.closest('[data-custom-sku]');
-  if (custom) {
-    row.sku = custom.dataset.customSku || row.sku; row.isCustom = true; row.productTitle = ''; row.variantTitle = ''; row.imageUrl = ''; row.shopifyVariantId = '';
-    rowEl.querySelector('[data-field="sku"]').value = row.sku; rowEl.querySelector('.sku-results').classList.add('hidden'); markSheetDirty(rowEl, row); scheduleSave(); showToast('Custom SKU kept');
-  }
-});
-document.addEventListener('click', event => { if (!event.target.closest('.field-sku')) closeAllSearches(); });
-
-function addRow() {
-  const lastParty = state.rows.length ? state.rows[state.rows.length - 1].partyName : '';
-  const row = newRow(lastParty || ''); state.rows.push(row); rowsContainer.appendChild(renderRow(row)); emptyState.classList.add('hidden'); updateSummary(); scheduleSave();
-  setTimeout(() => rowsContainer.lastElementChild?.querySelector('.sku-input')?.focus(), 50);
-}
-$('#addRowBtn').addEventListener('click', addRow); $('#mobileAddBtn').addEventListener('click', addRow);
-
-function copySafe(value) { return String(value ?? '').replace(/[\t\r\n]+/g, ' ').trim(); }
 async function copyForExcel() {
-  const rows = state.rows.filter(meaningful); if (!rows.length) return showToast('Nothing to copy.');
-  const lines = [['Date', 'Party Name', 'SKU', 'Qnt', 'Rate', 'Total', 'Compare Rate', 'Remarks'].join('\t'),
-    ...rows.map(r => [copySafe(r.date), copySafe(r.partyName), copySafe(r.sku), Number(r.qty || 0), Number(r.rate || 0), calcTotal(r), Number(r.compareRate || 0), copySafe(r.remarks)].join('\t'))];
+  const party = getPartyName();
+  const rows = state.rows.filter(meaningful);
+  if (!rows.length) return showToast('Nothing to copy.');
+  const lines = [
+    ['Date','Party Name','SKU','Qnt','Rate','Total','Compare Rate','Remarks'].join('\t'),
+    ...rows.map(r => [copySafe(state.date), copySafe(party), copySafe(r.sku), Number(r.qty || 0), Number(r.rate || 0), calcTotal(r), r.compareRate === '' ? '' : Number(r.compareRate || 0), copySafe(r.remarks)].join('\t'))
+  ];
   const text = lines.join('\n');
-  try { await navigator.clipboard.writeText(text); } catch (_) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (_) {
     const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
   }
-  showToast(`${rows.length} row${rows.length === 1 ? '' : 's'} copied — paste into Excel.`);
+  showToast(`${rows.length} row${rows.length === 1 ? '' : 's'} copied for Excel.`);
 }
-$('#copyBtn').addEventListener('click', copyForExcel); $('#mobileCopyBtn').addEventListener('click', copyForExcel);
+$('#copyBtn').addEventListener('click', () => { copyForExcel(); closeDrawer(); });
 
-function resetSheet() {
-  const count = state.rows.filter(meaningful).length;
-  const message = count ? `Current ${count} purchase row(s) will be saved in History, then a new blank sheet will open. Continue?` : 'Open a new blank sheet?';
-  if (!confirm(message)) return; if (count) archiveCurrent(); state.rows = [newRow()]; renderAll(); scheduleSave(); showToast(count ? 'Saved to History. New sheet ready.' : 'New sheet ready.');
+function resetCurrent({ archive = true } = {}) {
+  if (archive && state.rows.some(meaningful)) archiveCurrent();
+  state.date = todayISO(); state.partyName = ''; state.rows = [rowTemplate()]; state.batchSentAt = ''; state.batchNeedsUpdate = false;
+  $('#purchaseDate').value = state.date; $('#newPartyInput').value = ''; renderPartySelect(); renderAll(); saveDraft();
 }
-$('#resetBtn').addEventListener('click', resetSheet);
+$('#newPurchaseBtn').addEventListener('click', () => {
+  const count = state.rows.filter(meaningful).length;
+  if (count && !confirm('Start a new purchase? Current entries will be saved in History.')) return;
+  resetCurrent({ archive: true }); closeDrawer(); showToast('New purchase ready.');
+});
 
 function openHistory() {
-  $('#historyModal').classList.remove('hidden'); const list = $('#historyList'); const items = readHistory();
-  if (!items.length) { list.innerHTML = '<div class="history-empty">No saved sheets yet. New Sheet will archive the current filled sheet here.</div>'; return; }
-  list.innerHTML = items.map(item => `<div class="history-item"><div><div class="history-title">${escapeHtml(new Date(item.createdAt).toLocaleString())}</div><div class="history-meta">${item.rowCount} rows • Qty ${money(item.totalQty)} • Total ৳${money(item.grandTotal)}</div></div><button class="btn" type="button" data-restore-id="${escapeHtml(item.id)}">Restore</button></div>`).join('');
+  const list = $('#historyList');
+  const items = readHistory();
+  if (!items.length) list.innerHTML = '<div class="search-empty">No history saved yet.</div>';
+  else list.innerHTML = items.map(item => `
+    <div class="history-item">
+      <div><div class="history-item-title">${escapeHtml(item.partyName || 'No Party')}</div><div class="history-item-meta">${escapeHtml(item.date || '')} • ${item.rows?.length || 0} products • Qty ${money(item.totalQty)} • ৳${money(item.totalAmount)}</div></div>
+      <button class="btn" type="button" data-restore-history="${escapeHtml(item.id)}">Restore</button>
+    </div>`).join('');
+  $('#historyModal').classList.remove('hidden'); closeDrawer();
 }
-$('#historyBtn').addEventListener('click', openHistory); $('#mobileHistoryBtn').addEventListener('click', openHistory);
-$('#historyList').addEventListener('click', event => {
-  const btn = event.target.closest('[data-restore-id]'); if (!btn) return;
-  if (!confirm('Restore this saved sheet? Your current filled sheet will be archived first.')) return;
-  const items = readHistory(); const item = items.find(x => x.id === btn.dataset.restoreId); if (!item) return showToast('Saved sheet not found.');
-  if (state.rows.some(meaningful)) archiveCurrent(); state.rows = item.rows.map(r => ({ ...newRow(), ...r, id: r.id || uid() })); if (!state.rows.length) state.rows = [newRow()];
-  renderAll(); scheduleSave(); $('#historyModal').classList.add('hidden'); showToast('Saved sheet restored.');
+$('#historyBtn').addEventListener('click', openHistory);
+$('#historyList').addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-restore-history]');
+  if (!btn) return;
+  const item = readHistory().find(x => x.id === btn.dataset.restoreHistory);
+  if (!item) return showToast('History item not found.');
+  if (state.rows.some(meaningful) && !confirm('Restore this history? Current entries will be archived first.')) return;
+  if (state.rows.some(meaningful)) archiveCurrent();
+  state.date = item.date || todayISO(); state.partyName = item.partyName || '';
+  state.rows = (item.rows || []).map(r => ({ ...rowTemplate(), ...r, id: r.id || uid() }));
+  if (!state.rows.length) state.rows = [rowTemplate()];
+  state.batchSentAt = ''; state.batchNeedsUpdate = false;
+  $('#purchaseDate').value = state.date; renderPartySelect(); renderAll(); saveDraft();
+  $('#historyModal').classList.add('hidden'); showToast('History restored.');
+});
+$('#clearHistoryBtn').addEventListener('click', () => {
+  if (!confirm('Are you sure you want to clear all history?')) return;
+  writeHistory([]); closeDrawer(); showToast('History cleared.');
 });
 
-document.addEventListener('click', event => {
-  const close = event.target.closest('[data-close]'); if (!close) return;
-  if (close.dataset.close === 'image') $('#imageModal').classList.add('hidden');
-  if (close.dataset.close === 'history') $('#historyModal').classList.add('hidden');
-});
-document.addEventListener('keydown', event => { if (event.key === 'Escape') { $('#imageModal').classList.add('hidden'); $('#historyModal').classList.add('hidden'); closeAllSearches(); } });
+function openDrawer() { $('#sideDrawer').classList.add('open'); $('#sideDrawer').setAttribute('aria-hidden','false'); $('#drawerBackdrop').classList.remove('hidden'); }
+function closeDrawer() { $('#sideDrawer').classList.remove('open'); $('#sideDrawer').setAttribute('aria-hidden','true'); $('#drawerBackdrop').classList.add('hidden'); }
+$('#menuBtn').addEventListener('click', openDrawer);
+$('#closeDrawerBtn').addEventListener('click', closeDrawer);
+$('#drawerBackdrop').addEventListener('click', closeDrawer);
 
-function showBackendSetup(message = '') {
-  state.authenticated = false; $('#appRoot').classList.add('hidden'); $('#mobileActionbar').classList.add('hidden'); $('#loginScreen').classList.remove('hidden');
-  $('#backendForm').classList.remove('hidden'); $('#loginForm').classList.add('hidden'); $('#backendError').textContent = message;
-  $('#backendUrlInput').value = state.backendUrl || ''; setTimeout(() => $('#backendUrlInput').focus(), 50);
-}
-function showLogin(message = '') {
-  state.authenticated = false; $('#appRoot').classList.add('hidden'); $('#mobileActionbar').classList.add('hidden'); $('#loginScreen').classList.remove('hidden');
-  $('#backendForm').classList.add('hidden'); $('#loginForm').classList.remove('hidden'); $('#loginError').textContent = message; setTimeout(() => $('#pinInput').focus(), 50);
-}
-function showApp() {
-  state.authenticated = true; $('#loginScreen').classList.add('hidden'); $('#appRoot').classList.remove('hidden'); $('#mobileActionbar').classList.remove('hidden');
-}
-$('#backendForm').addEventListener('submit', async event => {
-  event.preventDefault(); $('#backendError').textContent = '';
-  const url = cleanBackendUrl($('#backendUrlInput').value); if (!url) { $('#backendError').textContent = 'Please paste the Apps Script /exec URL.'; return; }
-  state.backendUrl = url;
+async function manualSync(full = false) {
+  if (state.syncing) return;
+  if (!navigator.onLine) return showToast('Internet is required to sync Shopify.');
+  const button = full ? $('#fullSyncBtn') : $('#manualSyncBtn');
+  if (full && !confirm('Full catalog rebuild downloads the complete Shopify SKU catalog. Continue?')) return;
+  state.syncing = true; button.disabled = true; setSyncStatus('Updating products…');
   try {
-    const json = await jsonp('ping'); if (!json.ok) throw new Error(json.error || 'Backend test failed');
-    localStorage.setItem(BACKEND_KEY, url); state.shopifyConfigured = Boolean(json.shopifyConfigured); state.sheetConfigured = Boolean(json.sheetConfigured); showLogin();
-  } catch (e) { $('#backendError').textContent = e.message || 'Could not connect to Apps Script.'; }
-});
-$('#changeConnectionLogin').addEventListener('click', () => showBackendSetup());
-$('#connectionBtn').addEventListener('click', () => { if (confirm('Change the Apps Script backend URL?')) showBackendSetup(); });
-$('#loginForm').addEventListener('submit', async event => {
-  event.preventDefault(); $('#loginError').textContent = ''; const pin = $('#pinInput').value.trim(); if (!pin) return;
+    const action = full ? 'startFullSync' : 'syncIncremental';
+    const res = await jsonp(action, { pin: state.pin }, full ? 90000 : 60000);
+    if (!res.ok) throw new Error(res.error || 'Sync failed.');
+    if (res.continuing) {
+      setSyncStatus('Full sync started. It will continue automatically…');
+      showToast('Full sync started. You can keep using the app.');
+    } else {
+      setSyncStatus('Products updated successfully');
+      showToast(`Products updated${res.changed !== undefined ? ` • ${res.changed} changed` : ''}.`);
+    }
+    await refreshLocalCatalog({ forceMeta: true });
+  } catch (err) {
+    setSyncStatus(err.message || 'Sync failed'); showToast(err.message || 'Sync failed.', 3600);
+  } finally {
+    state.syncing = false; button.disabled = false;
+  }
+}
+$('#manualSyncBtn').addEventListener('click', () => manualSync(false));
+$('#fullSyncBtn').addEventListener('click', () => manualSync(true));
+
+function showBackendSetup() {
+  $('#loginScreen').classList.remove('hidden'); $('#appRoot').classList.add('hidden');
+  $('#backendForm').classList.remove('hidden'); $('#loginForm').classList.add('hidden');
+  $('#loginIntro').textContent = 'Paste your Apps Script Web App URL once.';
+  $('#backendUrlInput').value = state.backendUrl || '';
+}
+function showLogin() {
+  $('#loginScreen').classList.remove('hidden'); $('#appRoot').classList.add('hidden');
+  $('#backendForm').classList.add('hidden'); $('#loginForm').classList.remove('hidden');
+  $('#loginIntro').textContent = 'Enter your private PIN.';
+  setTimeout(() => $('#pinInput').focus(), 30);
+}
+function showApp() { $('#loginScreen').classList.add('hidden'); $('#appRoot').classList.remove('hidden'); }
+
+$('#backendForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const url = cleanBackendUrl($('#backendUrlInput').value);
+  if (!url) { $('#backendError').textContent = 'Enter a valid Apps Script /exec URL.'; return; }
+  state.backendUrl = url; localStorage.setItem(KEYS.backend, url); $('#backendError').textContent = '';
   try {
-    const json = await jsonp('auth', { pin }); if (!json.ok) { $('#loginError').textContent = json.error || 'Invalid PIN'; return; }
-    state.pin = pin; sessionStorage.setItem(PIN_SESSION_KEY, pin); $('#pinInput').value = ''; showApp(); initData(); await checkBackend();
-  } catch (e) { $('#loginError').textContent = e.message || 'Backend is not reachable.'; }
+    const res = await jsonp('ping', {}, 20000);
+    if (!res.ok) throw new Error('Backend did not respond.');
+    showLogin();
+  } catch (err) { $('#backendError').textContent = err.message || 'Could not connect.'; }
 });
-$('#logoutBtn').addEventListener('click', () => { state.pin = ''; sessionStorage.removeItem(PIN_SESSION_KEY); showLogin(); });
+$('#changeConnectionLogin').addEventListener('click', showBackendSetup);
+$('#connectionBtn').addEventListener('click', () => { closeDrawer(); showBackendSetup(); });
 
-function initData() {
-  const local = readDraftLocal(); state.rows = local?.rows?.length ? local.rows.map(r => ({ ...newRow(), ...r, id: r.id || uid() })) : [newRow()];
-  renderAll(); setSaveStatus('Saved on device', 'ok'); if (local?.updatedAt) lastSavedText.textContent = `Saved ${new Date(local.updatedAt).toLocaleString()}`;
-}
-function updateNetworkStatus() {
-  const online = navigator.onLine; setChip($('#networkChip'), $('#networkText'), online, online ? 'Online' : 'Offline', !online);
-  setChip($('#cloudChip'), $('#cloudText'), true, 'Device Saved');
-  if (online && state.authenticated) setTimeout(checkBackend, 300);
-}
-window.addEventListener('online', updateNetworkStatus); window.addEventListener('offline', updateNetworkStatus);
+$('#loginForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const pin = $('#pinInput').value.trim();
+  if (!pin) return;
+  $('#loginError').textContent = '';
+  try {
+    const res = await jsonp('auth', { pin }, 20000);
+    if (!res.ok) throw new Error(res.error || 'Invalid PIN');
+    state.pin = pin; sessionStorage.setItem(KEYS.pinSession, pin); showApp(); await initApp();
+  } catch (err) { $('#loginError').textContent = err.message || 'Could not log in.'; }
+});
+$('#logoutBtn').addEventListener('click', () => { sessionStorage.removeItem(KEYS.pinSession); state.pin = ''; closeDrawer(); showLogin(); });
 
-window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); state.deferredInstallPrompt = event; $('#installBtn').classList.remove('hidden'); });
+window.addEventListener('beforeinstallprompt', (event) => { event.preventDefault(); state.deferredInstallPrompt = event; $('#installBtn').classList.remove('hidden'); });
 $('#installBtn').addEventListener('click', async () => {
-  if (!state.deferredInstallPrompt) return showToast('Use browser menu → Add to Home screen / Install app.');
-  state.deferredInstallPrompt.prompt(); await state.deferredInstallPrompt.userChoice; state.deferredInstallPrompt = null; $('#installBtn').classList.add('hidden');
+  if (!state.deferredInstallPrompt) return;
+  state.deferredInstallPrompt.prompt();
+  await state.deferredInstallPrompt.userChoice;
+  state.deferredInstallPrompt = null; $('#installBtn').classList.add('hidden');
 });
-window.addEventListener('appinstalled', () => { $('#installBtn').classList.add('hidden'); showToast('App installed on this device.'); });
+
+window.addEventListener('online', () => { refreshLocalCatalog(); loadReferenceData(); });
+window.addEventListener('offline', () => setSyncStatus('Offline • local SKU search still works'));
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state.pin && navigator.onLine) refreshLocalCatalog(); });
+setInterval(() => { if (state.pin && navigator.onLine && !document.hidden) refreshLocalCatalog(); }, 15 * 60 * 1000);
+
+async function initApp() {
+  const draft = readDraft();
+  state.date = draft?.date || todayISO();
+  state.partyName = draft?.partyName || '';
+  state.rows = Array.isArray(draft?.rows) && draft.rows.length ? draft.rows.map(r => ({ ...rowTemplate(), ...r, id: r.id || uid(), rate: r.rate === 0 ? '' : r.rate })) : [rowTemplate()];
+  state.batchSentAt = draft?.batchSentAt || '';
+  state.batchNeedsUpdate = Boolean(draft?.batchNeedsUpdate);
+  $('#purchaseDate').value = state.date;
+  renderPartySelect(); renderAll();
+
+  await loadCatalogFromDevice();
+  await Promise.allSettled([loadReferenceData(), refreshLocalCatalog({ forceMeta: true })]);
+  saveDraft();
+}
 
 async function boot() {
-  updateNetworkStatus(); if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
-  state.backendUrl = cleanBackendUrl(localStorage.getItem(BACKEND_KEY) || '');
-  state.pin = sessionStorage.getItem(PIN_SESSION_KEY) || '';
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  state.backendUrl = cleanBackendUrl(localStorage.getItem(KEYS.backend) || '');
+  state.pin = sessionStorage.getItem(KEYS.pinSession) || '';
   if (!state.backendUrl) return showBackendSetup();
   if (state.pin) {
-    try { const json = await jsonp('auth', { pin: state.pin }); if (json.ok) { showApp(); initData(); await checkBackend(); return; } } catch (_) {}
-    state.pin = ''; sessionStorage.removeItem(PIN_SESSION_KEY);
+    try {
+      const res = await jsonp('auth', { pin: state.pin }, 20000);
+      if (res.ok) { showApp(); await initApp(); return; }
+    } catch (_) {}
+    state.pin = ''; sessionStorage.removeItem(KEYS.pinSession);
   }
   showLogin();
 }
+
 boot();

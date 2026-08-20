@@ -7,121 +7,149 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Purchase" />
-  <title>Daily Purchase Entry</title>
+  <title>Daily Purchase</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./styles.css?v=4.0.0" />
 </head>
 <body>
   <div id="loginScreen" class="login-screen">
     <div class="login-card">
-      <div class="login-icon">P</div>
+      <div class="login-mark">P</div>
       <div class="eyebrow">PRIVATE PURCHASE APP</div>
       <h1>Daily Purchase</h1>
-      <p id="loginIntro">Connect the app once, then enter your private PIN.</p>
+      <p id="loginIntro">Connect once, then use your private PIN.</p>
 
       <form id="backendForm" class="hidden">
-        <label for="backendUrlInput">Apps Script Web App URL</label>
+        <label class="label" for="backendUrlInput">Apps Script Web App URL</label>
         <input id="backendUrlInput" class="input" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/.../exec" />
-        <button class="btn btn-primary login-btn" type="submit">Save Connection</button>
-        <div id="backendError" class="login-error"></div>
+        <button class="btn primary wide" type="submit">Save Connection</button>
+        <div id="backendError" class="form-error"></div>
       </form>
 
       <form id="loginForm" class="hidden">
-        <label for="pinInput">App PIN</label>
-        <input id="pinInput" class="input pin-input" type="password" inputmode="numeric" autocomplete="current-password" placeholder="••••••" maxlength="20" />
-        <button class="btn btn-primary login-btn" type="submit">Open App</button>
-        <button class="btn compact-btn" id="changeConnectionLogin" type="button" style="width:100%;margin-top:8px">Change backend URL</button>
-        <div id="loginError" class="login-error"></div>
+        <label class="label" for="pinInput">App PIN</label>
+        <input id="pinInput" class="input pin-input" type="password" inputmode="numeric" autocomplete="current-password" placeholder="••••••" maxlength="24" />
+        <button class="btn primary wide" type="submit">Open App</button>
+        <button class="btn ghost wide" id="changeConnectionLogin" type="button">Change backend URL</button>
+        <div id="loginError" class="form-error"></div>
       </form>
     </div>
   </div>
 
   <div id="appRoot" class="app-shell hidden">
-    <header class="topbar">
+    <header class="app-header">
       <div>
-        <div class="eyebrow">PURCHASE MANAGEMENT</div>
-        <h1>Daily Purchase Entry</h1>
-        <p class="subtitle">Shopify SKU search • Saved on device • Google Sheet push • Excel copy</p>
+        <div class="eyebrow">PURCHASE</div>
+        <h1>Daily Purchase</h1>
       </div>
-      <div class="top-actions">
-        <button class="btn install-btn hidden" id="installBtn" type="button">Install App</button>
-        <button class="btn compact-btn" id="connectionBtn" type="button">Connection</button>
-        <button class="btn compact-btn" id="logoutBtn" type="button">Log out</button>
-      </div>
+      <button id="menuBtn" class="icon-button menu-button" type="button" aria-label="Open menu">☰</button>
     </header>
 
-    <div class="status-row">
-      <div class="connection" id="shopifyChip"><span class="status-dot"></span><span id="shopifyText">Checking Shopify…</span></div>
-      <div class="connection" id="cloudChip"><span class="status-dot"></span><span id="cloudText">Device Save</span></div>
-      <div class="connection" id="sheetChip"><span class="status-dot"></span><span id="sheetText">Checking Sheet…</span></div>
-      <div class="connection" id="networkChip"><span class="status-dot"></span><span id="networkText">Online</span></div>
-    </div>
-
-    <section class="summary-grid" aria-label="Summary">
-      <div class="summary-card"><span>Rows</span><strong id="sumRows">0</strong></div>
-      <div class="summary-card"><span>Total Qty</span><strong id="sumQty">0</strong></div>
-      <div class="summary-card wide"><span>Grand Total</span><strong id="sumTotal">৳0</strong></div>
-      <div class="summary-card save-card"><span>Save Status</span><strong id="saveStatus">Saved</strong></div>
+    <section class="context-card">
+      <div class="context-grid">
+        <div class="field">
+          <label class="label" for="purchaseDate">Date</label>
+          <input id="purchaseDate" class="input" type="date" />
+        </div>
+        <div class="field">
+          <label class="label" for="partySelect">Party Name</label>
+          <select id="partySelect" class="input select-input">
+            <option value="">Select Party</option>
+            <option value="__new__">+ New Party</option>
+          </select>
+          <input id="newPartyInput" class="input hidden new-party-input" type="text" autocomplete="off" placeholder="Enter new party name" />
+        </div>
+      </div>
+      <div class="top-actions-row">
+        <button id="addProductBtn" class="btn primary" type="button">＋ Add Product</button>
+        <div class="grand-total-box">
+          <span>Grand Total</span>
+          <strong id="grandTotalTop">৳0</strong>
+        </div>
+      </div>
     </section>
 
-    <section class="toolbar desktop-toolbar">
-      <button class="btn btn-primary" id="addRowBtn" type="button">＋ Add Row</button>
-      <button class="btn" id="copyBtn" type="button">⧉ Copy Excel</button>
-      <button class="btn" id="historyBtn" type="button">◷ History</button>
-      <button class="btn btn-danger-soft" id="resetBtn" type="button">↻ New Sheet</button>
-    </section>
-
-    <div class="helper-note">
-      SKU লিখলে Shopify থেকে matching product ও ছবি দেখাবে। “Send to Sheet” চাপলে Date, Party, SKU, Qnt, Rate ও Remarks যাবে। Total ও Compare Rate Google Sheet-এর formula-তেই থাকবে।
-    </div>
-
-    <main class="sheet-card">
-      <div class="table-head purchase-grid" aria-hidden="true">
-        <div>Date</div><div>Party Name</div><div>SKU</div><div>Qnt</div><div>Rate</div><div>Total</div><div>Compare Rate</div><div>Remarks</div><div>Google Sheet</div>
+    <main>
+      <div id="catalogNotice" class="catalog-notice hidden"></div>
+      <section id="productsContainer" class="products-list"></section>
+      <div id="emptyState" class="empty-state hidden">
+        <div class="empty-plus">＋</div>
+        <strong>No product yet</strong>
+        <span>Add a product to start this purchase.</span>
       </div>
-      <div id="rowsContainer"></div>
-      <div class="empty-state hidden" id="emptyState">
-        <div class="empty-icon">＋</div>
-        <strong>No purchase rows yet</strong>
-        <span>Add a row to start today's purchase.</span>
-      </div>
+
+      <section class="purchase-summary-card">
+        <div class="summary-values">
+          <div><span>Total Quantity</span><strong id="totalQty">0</strong></div>
+          <div><span>Total Amount</span><strong id="totalAmount">৳0</strong></div>
+        </div>
+        <div class="bottom-actions">
+          <button id="addAnotherBtn" class="btn" type="button">＋ Add Another Product</button>
+          <button id="sendBatchBtn" class="btn primary send-batch" type="button">Send to Sheet</button>
+        </div>
+      </section>
     </main>
-
-    <footer>
-      <span id="lastSavedText">Saved on this device</span>
-      <span>Daily Purchase GitHub PWA v3</span>
-    </footer>
   </div>
 
-  <div class="mobile-actionbar hidden" id="mobileActionbar">
-    <button class="mobile-action primary" id="mobileAddBtn" type="button"><span>＋</span>Add Item</button>
-    <button class="mobile-action" id="mobileCopyBtn" type="button"><span>⧉</span>Copy Excel</button>
-    <button class="mobile-action" id="mobileHistoryBtn" type="button"><span>◷</span>History</button>
-  </div>
-
-  <div class="toast" id="toast"></div>
-
-  <div class="modal hidden" id="imageModal">
-    <div class="modal-backdrop" data-close="image"></div>
-    <div class="modal-card image-modal-card">
-      <button class="icon-btn modal-close" type="button" data-close="image">×</button>
-      <div class="image-wrap"><img id="imagePreview" alt="Product preview" /></div>
-      <div class="modal-copy"><h2 id="imageTitle"></h2><p id="imageSku"></p></div>
+  <div id="drawerBackdrop" class="drawer-backdrop hidden"></div>
+  <aside id="sideDrawer" class="side-drawer" aria-hidden="true">
+    <div class="drawer-header">
+      <div><div class="eyebrow">TOOLS</div><h2>Options</h2></div>
+      <button id="closeDrawerBtn" class="icon-button" type="button" aria-label="Close menu">×</button>
     </div>
-  </div>
 
-  <div class="modal hidden" id="historyModal">
-    <div class="modal-backdrop" data-close="history"></div>
-    <div class="modal-card">
-      <div class="modal-header">
-        <div><div class="eyebrow">ARCHIVED SHEETS</div><h2>Purchase History</h2></div>
-        <button class="icon-btn" type="button" data-close="history">×</button>
+    <div class="drawer-group">
+      <button id="historyBtn" class="drawer-action" type="button"><span>◷</span><div><strong>History</strong><small>Saved purchase batches</small></div></button>
+      <button id="clearHistoryBtn" class="drawer-action" type="button"><span>⌫</span><div><strong>Clear History</strong><small>Delete saved history only</small></div></button>
+      <button id="copyBtn" class="drawer-action" type="button"><span>⧉</span><div><strong>Copy</strong><small>Copy current purchase for Excel</small></div></button>
+      <button id="newPurchaseBtn" class="drawer-action" type="button"><span>＋</span><div><strong>New Purchase</strong><small>Archive current and start fresh</small></div></button>
+    </div>
+
+    <div class="drawer-section-title">Shopify Catalog</div>
+    <div class="sync-card">
+      <div class="sync-meta-row"><span>Last Sync</span><strong id="lastSyncText">—</strong></div>
+      <div class="sync-meta-row"><span>Products/SKUs</span><strong id="catalogCountText">—</strong></div>
+      <div id="syncStatusText" class="sync-status">Ready</div>
+      <button id="manualSyncBtn" class="btn wide" type="button">↻ Sync Products</button>
+      <button id="fullSyncBtn" class="text-button" type="button">Full catalog rebuild</button>
+    </div>
+
+    <div class="drawer-section-title">App</div>
+    <div class="drawer-group">
+      <button id="installBtn" class="drawer-action hidden" type="button"><span>⇩</span><div><strong>Install App</strong><small>Add to Home Screen</small></div></button>
+      <button id="connectionBtn" class="drawer-action" type="button"><span>⌁</span><div><strong>Connection</strong><small>Change Apps Script URL</small></div></button>
+      <button id="logoutBtn" class="drawer-action" type="button"><span>↪</span><div><strong>Log out</strong><small>Clear PIN from this session</small></div></button>
+    </div>
+    <div class="version-text">Daily Purchase v4 • Instant Catalog Search</div>
+  </aside>
+
+  <div id="toast" class="toast"></div>
+
+  <div id="imageModal" class="modal hidden">
+    <div class="modal-backdrop" data-close-modal="image"></div>
+    <div class="modal-card product-preview-card">
+      <button class="icon-button modal-close" type="button" data-close-modal="image">×</button>
+      <div class="large-image-wrap"><img id="previewImage" alt="Product preview" /></div>
+      <div class="preview-details">
+        <div id="previewSku" class="preview-sku"></div>
+        <h2 id="previewTitle"></h2>
+        <div id="previewPrice" class="preview-price"></div>
       </div>
-      <div class="history-list" id="historyList"></div>
     </div>
   </div>
 
-  <script src="./app.js" defer></script>
+  <div id="historyModal" class="modal hidden">
+    <div class="modal-backdrop" data-close-modal="history"></div>
+    <div class="modal-card history-card">
+      <div class="modal-heading">
+        <div><div class="eyebrow">PURCHASE HISTORY</div><h2>History</h2></div>
+        <button class="icon-button" type="button" data-close-modal="history">×</button>
+      </div>
+      <div id="historyList" class="history-list"></div>
+    </div>
+  </div>
+
+  <script src="./app.js?v=4.0.0" defer></script>
 </body>
 </html>
