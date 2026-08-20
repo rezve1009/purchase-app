@@ -10,7 +10,7 @@
   <title>Daily Purchase</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-  <link rel="stylesheet" href="./styles.css?v=4.2.0" />
+  <link rel="stylesheet" href="./styles.css?v=4.3.0" />
 </head>
 <body>
   <div id="loginScreen" class="login-screen">
@@ -52,17 +52,16 @@
           <label class="label" for="purchaseDate">Date</label>
           <input id="purchaseDate" class="input" type="date" />
         </div>
-        <div class="field">
-          <label class="label" for="partySelect">Party Name</label>
-          <select id="partySelect" class="input select-input">
-            <option value="">Select Party</option>
-            <option value="__new__">+ New Party</option>
-          </select>
-          <input id="newPartyInput" class="input hidden new-party-input" type="text" autocomplete="off" placeholder="Enter new party name" />
+        <div class="field party-field">
+          <label class="label" for="partyInput">Party Name</label>
+          <div class="party-combobox">
+            <input id="partyInput" class="input party-input" type="text" autocomplete="off" placeholder="Type to search party" />
+            <div id="partyResults" class="party-results hidden"></div>
+          </div>
         </div>
       </div>
       <div class="top-actions-row">
-        <button id="addProductBtn" class="btn primary" type="button">＋ Add Product</button>
+        <button id="newPurchaseTopBtn" class="btn primary" type="button">＋ New Purchase</button>
         <div class="grand-total-box">
           <span>Grand Total</span>
           <strong id="grandTotalTop">৳0</strong>
@@ -85,7 +84,7 @@
           <div><span>Total Amount</span><strong id="totalAmount">৳0</strong></div>
         </div>
         <div class="bottom-actions">
-          <button id="addAnotherBtn" class="btn" type="button">＋ Add Another Product</button>
+          <button id="addAnotherBtn" class="btn" type="button">＋ Add Product</button>
           <button id="sendBatchBtn" class="btn primary send-batch" type="button">Send to Sheet</button>
         </div>
       </section>
@@ -103,7 +102,6 @@
       <button id="historyBtn" class="drawer-action" type="button"><span>◷</span><div><strong>History</strong><small>Saved purchase batches</small></div></button>
       <button id="clearHistoryBtn" class="drawer-action" type="button"><span>⌫</span><div><strong>Clear History</strong><small>Delete saved history only</small></div></button>
       <button id="copyBtn" class="drawer-action" type="button"><span>⧉</span><div><strong>Copy</strong><small>Copy current purchase for Excel</small></div></button>
-      <button id="newPurchaseBtn" class="drawer-action" type="button"><span>＋</span><div><strong>New Purchase</strong><small>Archive current and start fresh</small></div></button>
     </div>
 
     <div class="drawer-section-title">Shopify Catalog</div>
@@ -121,7 +119,7 @@
       <button id="connectionBtn" class="drawer-action" type="button"><span>⌁</span><div><strong>Connection</strong><small>Change Apps Script URL</small></div></button>
       <button id="logoutBtn" class="drawer-action" type="button"><span>↪</span><div><strong>Log out</strong><small>Clear PIN from this session</small></div></button>
     </div>
-    <div class="version-text">Daily Purchase v4.2 • Faster Sheet + Private Price</div>
+    <div class="version-text">v4.3</div>
   </aside>
 
   <div id="toast" class="toast"></div>
@@ -156,6 +154,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=4.2.0" defer></script>
+  <script src="./app.js?v=4.3.0" defer></script>
 </body>
 </html>

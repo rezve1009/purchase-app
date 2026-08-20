@@ -70,9 +70,7 @@ function rowTemplate() {
 }
 
 function getPartyName() {
-  const select = $('#partySelect');
-  if (select.value === '__new__') return $('#newPartyInput').value.trim();
-  return select.value.trim();
+  return String($('#partyInput')?.value || '').trim();
 }
 
 function showToast(message, duration = 2600) {
@@ -337,25 +335,65 @@ function archiveCurrent() {
   return snapshot;
 }
 
-function renderPartySelect() {
-  const select = $('#partySelect');
-  const current = state.partyName || '';
-  const unique = [...new Set(state.parties.map(x => String(x || '').trim()).filter(Boolean))]
+function normalizeParty(value) {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
+function uniquePartyList() {
+  return [...new Set(state.parties.map(x => String(x || '').trim()).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  select.innerHTML = '<option value="">Select Party</option><option value="__new__">+ New Party</option>' +
-    unique.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
-  const hasExisting = unique.includes(current);
-  if (current && hasExisting) {
-    select.value = current;
-    $('#newPartyInput').classList.add('hidden');
-  } else if (current) {
-    select.value = '__new__';
-    $('#newPartyInput').value = current;
-    $('#newPartyInput').classList.remove('hidden');
-  } else {
-    select.value = '';
-    $('#newPartyInput').classList.add('hidden');
-  }
+}
+
+function searchPartyList(query) {
+  const q = normalizeParty(query);
+  const list = uniquePartyList();
+  if (!q) return list.slice(0, 25);
+  return list
+    .map(name => {
+      const n = normalizeParty(name);
+      let rank = 99;
+      if (n === q) rank = 0;
+      else if (n.startsWith(q)) rank = 1;
+      else if (n.includes(q)) rank = 2;
+      return { name, rank };
+    })
+    .filter(x => x.rank < 99)
+    .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    .slice(0, 30)
+    .map(x => x.name);
+}
+
+function renderPartySelect() {
+  const input = $('#partyInput');
+  if (!input) return;
+  input.value = state.partyName || '';
+  $('#partyResults')?.classList.add('hidden');
+}
+
+function renderPartyResults(query = '') {
+  const box = $('#partyResults');
+  if (!box) return;
+  const results = searchPartyList(query);
+  box._results = results;
+  const q = String(query || '').trim();
+  const html = results.map((name, index) => `
+    <button class="party-result" type="button" data-party-index="${index}">
+      <span class="party-result-icon">◦</span>
+      <span>${escapeHtml(name)}</span>
+    </button>`).join('');
+  const newEntry = q
+    ? `<button class="party-new-result" type="button" data-party-new="1">＋ New Party: ${escapeHtml(q)}</button>`
+    : '<button class="party-new-result" type="button" data-party-new="1">＋ New Party</button>';
+  box.innerHTML = `${html || '<div class="search-empty">No matching party found.</div>'}${newEntry}`;
+  box.classList.remove('hidden');
+}
+
+function chooseParty(name) {
+  const clean = String(name || '').trim();
+  $('#partyInput').value = clean;
+  state.partyName = clean;
+  $('#partyResults').classList.add('hidden');
+  markBatchDirty();
 }
 
 async function loadReferenceData() {
@@ -401,7 +439,13 @@ function renderProductCard(row, index) {
       </div>
       <div class="field qty-field"><label class="label">Quantity</label><input class="input" data-field="qty" type="number" min="0" step="1" inputmode="numeric" value="${Number(row.qty || 0)}" /></div>
       <div class="field rate-field"><label class="label">Rate</label><input class="input" data-field="rate" type="number" min="0" step="0.01" inputmode="decimal" value="${row.rate === '' || row.rate === null || row.rate === undefined ? '' : Number(row.rate)}" placeholder="Rate" /></div>
-      <div class="field compare-field"><label class="label">Compare Rate</label><div class="compare-box${row.compareLoading ? ' loading' : ''}" data-compare>${compareText}</div></div>
+      <div class="field compare-field">
+        <label class="label">Compare Rate</label>
+        <div class="compare-control">
+          <div class="compare-box${row.compareLoading ? ' loading' : ''}" data-compare>${compareText}</div>
+          <button class="compare-use-button" type="button" data-action="use-compare" aria-label="Use Compare Rate as Rate" title="Use Compare Rate as Rate">←</button>
+        </div>
+      </div>
       <div class="field remarks-field"><label class="label">Remarks</label><textarea class="textarea" data-field="remarks" rows="1" placeholder="Remarks">${escapeHtml(row.remarks || '')}</textarea></div>
     </div>
     <div class="line-total"><span>Line Total</span><strong data-line-total>৳${money(calcTotal(row))}</strong></div>`;
@@ -558,6 +602,19 @@ $('#productsContainer').addEventListener('click', (event) => {
   const row = getRow(card.dataset.rowId);
   if (!row) return;
 
+  if (event.target.closest('[data-action="use-compare"]')) {
+    if (row.compareLoading) return showToast('Compare Rate is still loading.');
+    if (row.compareRate === '' || row.compareRate === null || row.compareRate === undefined) return showToast('Compare Rate is Nil.');
+    row.rate = Number(row.compareRate || 0);
+    const rateInput = card.querySelector('[data-field="rate"]');
+    if (rateInput) rateInput.value = String(row.rate);
+    const line = card.querySelector('[data-line-total]');
+    if (line) line.textContent = `৳${money(calcTotal(row))}`;
+    markBatchDirty();
+    showToast('Compare Rate copied to Rate.');
+    return;
+  }
+
   const resultBtn = event.target.closest('[data-result-index]');
   if (resultBtn) {
     const box = resultBtn.closest('.sku-results');
@@ -614,6 +671,7 @@ $('#previewPriceToggle').addEventListener('click', () => {
 
 document.addEventListener('click', (event) => {
   if (!event.target.closest('.sku-field')) closeSearches();
+  if (!event.target.closest('.party-field')) $('#partyResults')?.classList.add('hidden');
   const close = event.target.closest('[data-close-modal]');
   if (close) $('#'+(close.dataset.closeModal === 'image' ? 'imageModal' : 'historyModal')).classList.add('hidden');
 });
@@ -635,17 +693,114 @@ function addProduct(focus = true) {
   updateSummary(); markBatchDirty();
   if (focus) setTimeout(() => card.querySelector('.sku-input')?.focus(), 40);
 }
-$('#addProductBtn').addEventListener('click', () => addProduct());
 $('#addAnotherBtn').addEventListener('click', () => addProduct());
 
 $('#purchaseDate').addEventListener('change', () => { state.date = $('#purchaseDate').value || todayISO(); markBatchDirty(); });
-$('#partySelect').addEventListener('change', () => {
-  const isNew = $('#partySelect').value === '__new__';
-  $('#newPartyInput').classList.toggle('hidden', !isNew);
-  if (isNew) setTimeout(() => $('#newPartyInput').focus(), 20);
-  state.partyName = getPartyName(); markBatchDirty();
+
+$('#partyInput').addEventListener('input', () => {
+  state.partyName = getPartyName();
+  renderPartyResults(state.partyName);
+  markBatchDirty();
 });
-$('#newPartyInput').addEventListener('input', () => { state.partyName = getPartyName(); markBatchDirty(); });
+$('#partyInput').addEventListener('focus', () => renderPartyResults(getPartyName()));
+$('#partyInput').addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    $('#partyResults').classList.add('hidden');
+    return;
+  }
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  const box = $('#partyResults');
+  const first = box.querySelector('[data-party-index="0"]');
+  if (first) first.click();
+  else if (getPartyName()) chooseParty(getPartyName());
+});
+$('#partyResults').addEventListener('click', (event) => {
+  const result = event.target.closest('[data-party-index]');
+  if (result) {
+    const name = $('#partyResults')._results?.[Number(result.dataset.partyIndex)];
+    if (name) chooseParty(name);
+    return;
+  }
+  if (event.target.closest('[data-party-new]')) {
+    const current = getPartyName();
+    if (!current) {
+      $('#partyResults').classList.add('hidden');
+      $('#partyInput').focus();
+      showToast('Type the new Party Name.');
+      return;
+    }
+    chooseParty(current);
+    showToast('New Party selected.');
+  }
+});
+
+function submitBatchDirect(formParams, requestId, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const frameName = `purchase_sheet_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const iframe = document.createElement('iframe');
+    iframe.name = frameName;
+    iframe.style.display = 'none';
+    iframe.setAttribute('aria-hidden', 'true');
+
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = state.backendUrl;
+    form.target = frameName;
+    form.style.display = 'none';
+
+    const payload = { ...formParams, responseMode: 'message' };
+    Object.entries(payload).forEach(([key, value]) => {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = key;
+      input.value = String(value ?? '');
+      form.appendChild(input);
+    });
+
+    let finished = false;
+    let timer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+      setTimeout(() => { form.remove(); iframe.remove(); }, 50);
+    };
+    const finishResolve = (value) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve(value);
+    };
+    const finishReject = (err) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      reject(err);
+    };
+    const onMessage = (event) => {
+      const msg = event.data;
+      if (!msg || msg.source !== 'daily-purchase-sheet' || msg.requestId !== requestId) return;
+      finishResolve(msg.payload || {});
+    };
+
+    window.addEventListener('message', onMessage);
+    document.body.appendChild(iframe);
+    document.body.appendChild(form);
+
+    timer = setTimeout(async () => {
+      if (finished) return;
+      try {
+        const status = await jsonp('batchStatus', { pin: state.pin, requestId }, 10000);
+        if (status?.done) finishResolve(status);
+        else finishReject(new Error('Google Sheet response is taking too long. Please try once more.'));
+      } catch (err) {
+        finishReject(err);
+      }
+    }, timeoutMs);
+
+    form.submit();
+  });
+}
 
 async function sendBatchToSheet() {
   const party = getPartyName();
@@ -671,39 +826,23 @@ async function sendBatchToSheet() {
       remarks: r.remarks || ''
     }));
 
-    const form = new URLSearchParams({
+    const ack = await submitBatchDirect({
       action: 'sendBatchToSheet',
       requestId,
       pin: state.pin,
       date: state.date || todayISO(),
       partyName: party,
+      isUpdate: state.batchSentAt ? '1' : '0',
       itemsJson: JSON.stringify(payloadRows)
-    });
+    }, requestId);
 
-    // Apps Script does not expose CORS headers to GitHub Pages, so the POST is fire-and-forget.
-    // A tiny cached acknowledgement is checked instead of repeatedly scanning the whole Sheet.
-    fetch(state.backendUrl, { method: 'POST', mode: 'no-cors', body: form }).catch(() => {});
-
-    let ack = null;
-    const waits = [250, 300, 400, 550, 750, 1000, 1400];
-    for (const wait of waits) {
-      await new Promise(r => setTimeout(r, wait));
-      const status = await jsonp('batchStatus', { pin: state.pin, requestId }, 12000);
-      if (status.done) {
-        ack = status;
-        break;
-      }
-    }
-
-    if (!ack) throw new Error('Google Sheet response is taking too long. Please try once more.');
-    if (!ack.ok) throw new Error(ack.error || 'Could not send products to Google Sheet.');
+    if (!ack?.ok) throw new Error(ack?.error || 'Could not send products to Google Sheet.');
     if (Number(ack.count || 0) !== rows.length) throw new Error('Google Sheet did not save all products. Please try again.');
 
     const rowMap = ack.rows || {};
     rows.forEach(r => { r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0); });
     state.batchSentAt = new Date().toISOString();
     state.batchNeedsUpdate = false;
-    archiveCurrent();
     saveDraft();
     updateSummary();
     showToast(`${rows.length} product${rows.length === 1 ? '' : 's'} sent to Google Sheet.`);
@@ -738,12 +877,20 @@ $('#copyBtn').addEventListener('click', () => { copyForExcel(); closeDrawer(); }
 function resetCurrent({ archive = true } = {}) {
   if (archive && state.rows.some(meaningful)) archiveCurrent();
   state.date = todayISO(); state.partyName = ''; state.rows = [rowTemplate()]; state.batchSentAt = ''; state.batchNeedsUpdate = false;
-  $('#purchaseDate').value = state.date; $('#newPartyInput').value = ''; renderPartySelect(); renderAll(); saveDraft();
+  $('#purchaseDate').value = state.date; renderPartySelect(); renderAll(); saveDraft();
 }
-$('#newPurchaseBtn').addEventListener('click', () => {
+$('#newPurchaseTopBtn').addEventListener('click', () => {
   const count = state.rows.filter(meaningful).length;
-  if (count && !confirm('Start a new purchase? Current entries will be saved in History.')) return;
-  resetCurrent({ archive: true }); closeDrawer(); showToast('New purchase ready.');
+  if (!count) {
+    resetCurrent({ archive: false });
+    return showToast('New purchase ready.');
+  }
+
+  const safelySent = Boolean(state.batchSentAt && !state.batchNeedsUpdate);
+  if (!safelySent && !confirm('Start a new purchase? Current entries will be saved in History.')) return;
+
+  resetCurrent({ archive: true });
+  showToast(safelySent ? 'Purchase saved. New purchase ready.' : 'Current purchase saved in History.');
 });
 
 function openHistory() {
