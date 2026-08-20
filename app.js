@@ -384,7 +384,7 @@ function renderProductCard(row, index) {
   const card = document.createElement('article');
   card.className = 'product-card';
   card.dataset.rowId = row.id;
-  const compareText = row.compareLoading ? 'Loading…' : (row.compareRate === '' || row.compareRate === null || row.compareRate === undefined ? '—' : `৳${money(row.compareRate)}`);
+  const compareText = row.compareLoading ? 'Loading…' : (row.compareRate === '' || row.compareRate === null || row.compareRate === undefined ? 'Nil' : `৳${money(row.compareRate)}`);
   card.innerHTML = `
     <div class="product-card-head">
       <div class="product-number">PRODUCT ${index + 1}</div>
@@ -479,7 +479,7 @@ async function loadCompareRate(row, card) {
     const currentBox = currentCard?.querySelector('[data-compare]');
     if (currentBox) {
       currentBox.classList.remove('loading');
-      currentBox.textContent = row.compareRate === '' ? '—' : `৳${money(row.compareRate)}`;
+      currentBox.textContent = row.compareRate === '' ? 'Nil' : `৳${money(row.compareRate)}`;
     }
     saveDraft();
   }
@@ -528,7 +528,7 @@ $('#productsContainer').addEventListener('input', (event) => {
   if (name === 'sku') {
     row.productTitle = ''; row.price = ''; row.imageUrl = ''; row.variantId = ''; row.isCustom = true; row.compareRate = '';
     card.querySelector('[data-action="preview"]').innerHTML = '▧';
-    card.querySelector('[data-compare]').textContent = '—';
+    card.querySelector('[data-compare]').textContent = 'Nil';
     scheduleLocalSearch(card, row, field.value);
   }
   if (name === 'qty' || name === 'rate') card.querySelector('[data-line-total]').textContent = `৳${money(calcTotal(row))}`;
@@ -587,9 +587,29 @@ $('#productsContainer').addEventListener('click', (event) => {
     $('#previewImage').src = row.imageUrl;
     $('#previewSku').textContent = `SKU: ${row.sku}`;
     $('#previewTitle').textContent = row.productTitle || 'Product';
-    $('#previewPrice').textContent = row.price === '' || row.price === null || row.price === undefined ? '' : `Price: ৳${money(row.price)}`;
+    const priceToggle = $('#previewPriceToggle');
+    const hasPrice = !(row.price === '' || row.price === null || row.price === undefined);
+    priceToggle.dataset.price = hasPrice ? String(row.price) : '';
+    priceToggle.dataset.revealed = 'false';
+    priceToggle.setAttribute('aria-pressed', 'false');
+    priceToggle.setAttribute('aria-label', hasPrice ? 'Show sale price' : 'Sale price unavailable');
+    $('#previewPriceValue').textContent = hasPrice ? '••••••' : 'Not available';
+    $('#previewPriceEye').textContent = '👁';
     $('#imageModal').classList.remove('hidden');
   }
+});
+
+$('#previewPriceToggle').addEventListener('click', () => {
+  const btn = $('#previewPriceToggle');
+  const raw = btn.dataset.price || '';
+  if (!raw) return showToast('Sale price is not available for this product.');
+  const revealed = btn.dataset.revealed === 'true';
+  const next = !revealed;
+  btn.dataset.revealed = String(next);
+  btn.setAttribute('aria-pressed', String(next));
+  btn.setAttribute('aria-label', next ? 'Hide sale price' : 'Show sale price');
+  $('#previewPriceValue').textContent = next ? `৳${money(raw)}` : '••••••';
+  $('#previewPriceEye').textContent = next ? '◉' : '👁';
 });
 
 document.addEventListener('click', (event) => {
@@ -637,39 +657,65 @@ async function sendBatchToSheet() {
 
   const btn = $('#sendBatchBtn');
   const oldText = btn.textContent;
-  btn.disabled = true; btn.textContent = state.batchSentAt ? 'Updating…' : 'Sending…';
+  btn.disabled = true;
+  btn.textContent = state.batchSentAt ? 'Updating…' : 'Sending…';
+
   try {
+    const requestId = uid();
     const payloadRows = rows.map(r => ({
-      entryId: r.id, sku: r.sku, qty: Number(r.qty || 0), rate: Number(r.rate || 0), remarks: r.remarks || ''
+      entryId: r.id,
+      sheetRow: Number(r.sheetRow || 0),
+      sku: r.sku,
+      qty: Number(r.qty || 0),
+      rate: Number(r.rate || 0),
+      remarks: r.remarks || ''
     }));
+
     const form = new URLSearchParams({
-      action: 'sendBatchToSheet', pin: state.pin, date: state.date || todayISO(), partyName: party,
+      action: 'sendBatchToSheet',
+      requestId,
+      pin: state.pin,
+      date: state.date || todayISO(),
+      partyName: party,
       itemsJson: JSON.stringify(payloadRows)
     });
-    await fetch(state.backendUrl, { method: 'POST', mode: 'no-cors', body: form });
 
-    let confirmed = null;
-    for (let attempt = 0; attempt < 9 && !confirmed; attempt++) {
-      await new Promise(r => setTimeout(r, attempt === 0 ? 500 : 700));
-      const check = await jsonp('checkBatchEntries', { pin: state.pin, entryIds: rows.map(r => r.id).join(',') }, 25000);
-      if (check.ok && Number(check.found || 0) === rows.length) confirmed = check;
+    // Apps Script does not expose CORS headers to GitHub Pages, so the POST is fire-and-forget.
+    // A tiny cached acknowledgement is checked instead of repeatedly scanning the whole Sheet.
+    fetch(state.backendUrl, { method: 'POST', mode: 'no-cors', body: form }).catch(() => {});
+
+    let ack = null;
+    const waits = [250, 300, 400, 550, 750, 1000, 1400];
+    for (const wait of waits) {
+      await new Promise(r => setTimeout(r, wait));
+      const status = await jsonp('batchStatus', { pin: state.pin, requestId }, 12000);
+      if (status.done) {
+        ack = status;
+        break;
+      }
     }
-    if (!confirmed) throw new Error('Google Sheet did not confirm all products. Please try again.');
-    const rowMap = confirmed.rows || {};
+
+    if (!ack) throw new Error('Google Sheet response is taking too long. Please try once more.');
+    if (!ack.ok) throw new Error(ack.error || 'Could not send products to Google Sheet.');
+    if (Number(ack.count || 0) !== rows.length) throw new Error('Google Sheet did not save all products. Please try again.');
+
+    const rowMap = ack.rows || {};
     rows.forEach(r => { r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0); });
     state.batchSentAt = new Date().toISOString();
     state.batchNeedsUpdate = false;
     archiveCurrent();
-    saveDraft(); updateSummary();
+    saveDraft();
+    updateSummary();
     showToast(`${rows.length} product${rows.length === 1 ? '' : 's'} sent to Google Sheet.`);
   } catch (err) {
-    showToast(err.message || 'Could not send to Google Sheet.', 3600);
+    showToast(err.message || 'Could not send to Google Sheet.', 3800);
   } finally {
     btn.disabled = false;
     if (!state.batchSentAt) btn.textContent = oldText;
     updateSummary();
   }
 }
+
 $('#sendBatchBtn').addEventListener('click', sendBatchToSheet);
 
 async function copyForExcel() {

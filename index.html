@@ -10,7 +10,7 @@
   <title>Daily Purchase</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-  <link rel="stylesheet" href="./styles.css?v=4.0.0" />
+  <link rel="stylesheet" href="./styles.css?v=4.2.0" />
 </head>
 <body>
   <div id="loginScreen" class="login-screen">
@@ -121,7 +121,7 @@
       <button id="connectionBtn" class="drawer-action" type="button"><span>⌁</span><div><strong>Connection</strong><small>Change Apps Script URL</small></div></button>
       <button id="logoutBtn" class="drawer-action" type="button"><span>↪</span><div><strong>Log out</strong><small>Clear PIN from this session</small></div></button>
     </div>
-    <div class="version-text">Daily Purchase v4 • Instant Catalog Search</div>
+    <div class="version-text">Daily Purchase v4.2 • Faster Sheet + Private Price</div>
   </aside>
 
   <div id="toast" class="toast"></div>
@@ -134,7 +134,13 @@
       <div class="preview-details">
         <div id="previewSku" class="preview-sku"></div>
         <h2 id="previewTitle"></h2>
-        <div id="previewPrice" class="preview-price"></div>
+        <div class="preview-price-block">
+          <span class="preview-price-label">Sale Price</span>
+          <button id="previewPriceToggle" class="price-reveal-button" type="button" aria-label="Show sale price" aria-pressed="false">
+            <span id="previewPriceValue">••••••</span>
+            <span id="previewPriceEye" class="price-eye" aria-hidden="true">👁</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -150,6 +156,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=4.0.0" defer></script>
+  <script src="./app.js?v=4.2.0" defer></script>
 </body>
 </html>
