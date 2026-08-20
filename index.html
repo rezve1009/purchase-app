@@ -10,7 +10,7 @@
   <title>Daily Purchase</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-  <link rel="stylesheet" href="./styles.css?v=4.6.1" />
+  <link rel="stylesheet" href="./styles.css?v=4.7" />
 </head>
 <body>
   <div id="loginScreen" class="login-screen">
@@ -47,17 +47,10 @@
     </header>
 
     <section class="context-card">
-      <div class="context-grid">
+      <div class="context-grid date-only-grid">
         <div class="field">
           <label class="label" for="purchaseDate">Date</label>
           <input id="purchaseDate" class="input" type="date" />
-        </div>
-        <div class="field party-field">
-          <label class="label" for="partyInput">Party Name</label>
-          <div class="party-combobox">
-            <input id="partyInput" class="input party-input" type="text" autocomplete="off" placeholder="Type to search party" />
-            <div id="partyResults" class="party-results hidden"></div>
-          </div>
         </div>
       </div>
       <div class="top-actions-row">
@@ -75,10 +68,16 @@
       <section id="savedPartyCards" class="party-groups-list" aria-label="Saved parties in this purchase"></section>
 
       <section id="activePartyCard" class="party-group-card active-party-group">
-        <div class="party-group-head">
-          <div>
-            <span class="party-group-kicker">CURRENT PARTY</span>
-            <strong id="activePartyNameDisplay" class="party-group-name">Current Party</strong>
+        <div class="party-group-head editable-party-head">
+          <div class="party-head-main">
+            <span id="activePartyKicker" class="party-group-kicker">PARTY 1</span>
+            <div class="field party-field inline-party-field">
+              <label class="label" for="partyInput">Party Name</label>
+              <div class="party-combobox">
+                <input id="partyInput" class="input party-input" type="text" autocomplete="off" placeholder="Type to search party" />
+                <div id="partyResults" class="party-results hidden"></div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -133,7 +132,7 @@
       <button id="connectionBtn" class="drawer-action" type="button"><span>⌁</span><div><strong>Connection</strong><small>Change Apps Script URL</small></div></button>
       <button id="logoutBtn" class="drawer-action" type="button"><span>↪</span><div><strong>Log out</strong><small>Clear PIN from this session</small></div></button>
     </div>
-    <div class="version-text">v4.6.1</div>
+    <div class="version-text">v4.7</div>
   </aside>
 
   <div id="toast" class="toast"></div>
@@ -172,6 +171,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=4.6.1" defer></script>
+  <script src="./app.js?v=4.7" defer></script>
 </body>
 </html>

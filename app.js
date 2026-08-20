@@ -443,67 +443,85 @@ async function loadReferenceData() {
   }
 }
 
+function renderInlinePartyResults(box, query = '', groupId = '') {
+  const results = searchPartyList(query);
+  box._results = results;
+  const q = String(query || '').trim();
+  const html = results.map((name, index) => `
+    <button class="party-result" type="button" data-saved-party-result="${index}" data-party-group-id="${escapeHtml(groupId)}">
+      <span class="party-result-icon">◦</span>
+      <span>${escapeHtml(name)}</span>
+    </button>`).join('');
+  const newEntry = q
+    ? `<button class="party-new-result" type="button" data-saved-party-new="1" data-party-group-id="${escapeHtml(groupId)}">＋ New Party: ${escapeHtml(q)}</button>`
+    : `<button class="party-new-result" type="button" data-saved-party-new="1" data-party-group-id="${escapeHtml(groupId)}">＋ New Party</button>`;
+  box.innerHTML = `${html || '<div class="search-empty">No matching party found.</div>'}${newEntry}`;
+  box.classList.remove('hidden');
+}
+
+function getPendingGroup(groupId) {
+  return state.pendingParties.find(g => g.id === groupId) || null;
+}
+
 function renderPendingParties() {
   const container = $('#savedPartyCards');
   if (!container) return;
-
-  const groups = (state.pendingParties || [])
-    .map(g => ({ ...g, rows: (g.rows || []).filter(meaningful) }))
-    .filter(g => g.rows.length && String(g.partyName || '').trim());
-
+  const groups = state.pendingParties || [];
   if (!groups.length) {
     container.innerHTML = '';
     container.classList.add('hidden');
     return;
   }
 
-  container.innerHTML = groups.map(g => {
-    const rows = g.rows || [];
-    const qty = rows.reduce((sum, r) => sum + Number(r.qty || 0), 0);
-    const total = rows.reduce((sum, r) => sum + calcTotal(r), 0);
-    const productLines = rows.map(r => {
-      const q = Number(r.qty || 0);
-      const rate = Number(r.rate || 0);
-      return `
-        <div class="party-product-line">
-          <span class="party-product-sku">${escapeHtml(r.sku || '—')}</span>
-          <span class="party-product-calc">${money(q)} × ৳${money(rate)}</span>
-          <strong>৳${money(calcTotal(r))}</strong>
-        </div>`;
-    }).join('');
-
-    return `
-      <article class="party-group-card saved-party-group">
-        <div class="party-group-head">
-          <div>
-            <span class="party-group-kicker">PARTY</span>
-            <strong class="party-group-name">${escapeHtml(g.partyName)}</strong>
+  container.innerHTML = '';
+  groups.forEach((g, groupIndex) => {
+    const groupCard = document.createElement('article');
+    groupCard.className = 'party-group-card saved-party-group editable-saved-party';
+    groupCard.dataset.groupId = g.id;
+    groupCard.innerHTML = `
+      <div class="party-group-head editable-party-head">
+        <div class="party-head-main">
+          <span class="party-group-kicker">PARTY ${groupIndex + 1}</span>
+          <div class="field party-field inline-party-field">
+            <label class="label">Party Name</label>
+            <div class="party-combobox">
+              <input class="input party-input saved-party-input" type="text" autocomplete="off" value="${escapeHtml(g.partyName || '')}" placeholder="Type to search party" data-party-group-id="${escapeHtml(g.id)}" />
+              <div class="party-results saved-party-results hidden" data-party-results-for="${escapeHtml(g.id)}"></div>
+            </div>
           </div>
         </div>
-        <div class="party-products-compact">${productLines}</div>
-        <div class="party-card-total-row">
-          <div><span>Total Qty</span><strong>${money(qty)}</strong></div>
-          <div><span>Total Amount</span><strong>৳${money(total)}</strong></div>
-        </div>
-      </article>`;
-  }).join('');
-
+      </div>
+      <section class="products-list saved-party-products"></section>
+      <div class="party-card-footer-tools">
+        <button class="text-button party-add-product" type="button" data-add-product-group="${escapeHtml(g.id)}">＋ Add Product</button>
+      </div>
+      <div class="party-card-total-row">
+        <div><span>Total Qty</span><strong data-party-qty="${escapeHtml(g.id)}">0</strong></div>
+        <div><span>Total Amount</span><strong data-party-amount="${escapeHtml(g.id)}">৳0</strong></div>
+      </div>`;
+    const products = groupCard.querySelector('.saved-party-products');
+    (g.rows || []).forEach((row, index) => products.appendChild(renderProductCard(row, index, g.id)));
+    container.appendChild(groupCard);
+  });
   container.classList.remove('hidden');
+  updatePendingGroupTotals();
 }
 
 function renderAll() {
   renderPendingParties();
   const container = $('#productsContainer');
   container.innerHTML = '';
-  state.rows.forEach((row, index) => container.appendChild(renderProductCard(row, index)));
+  state.rows.forEach((row, index) => container.appendChild(renderProductCard(row, index, 'active')));
   $('#emptyState').classList.toggle('hidden', state.rows.length > 0);
+  if ($('#activePartyKicker')) $('#activePartyKicker').textContent = `PARTY ${state.pendingParties.length + 1}`;
   updateSummary();
 }
 
-function renderProductCard(row, index) {
+function renderProductCard(row, index, groupId = 'active') {
   const card = document.createElement('article');
   card.className = 'product-card';
   card.dataset.rowId = row.id;
+  card.dataset.groupId = groupId;
   const compareWhole = wholeAmount(row.compareRate);
   const compareText = row.compareLoading ? 'Loading…' : (compareWhole === null ? 'Nil' : `৳${money(compareWhole)}`);
   card.innerHTML = `
@@ -535,16 +553,27 @@ function renderProductCard(row, index) {
   return card;
 }
 
+function updatePendingGroupTotals() {
+  (state.pendingParties || []).forEach(g => {
+    const rows = (g.rows || []).filter(meaningful);
+    const qty = rows.reduce((sum, r) => sum + Number(r.qty || 0), 0);
+    const total = rows.reduce((sum, r) => sum + calcTotal(r), 0);
+    const qtyEl = document.querySelector(`[data-party-qty="${CSS.escape(g.id)}"]`);
+    const amountEl = document.querySelector(`[data-party-amount="${CSS.escape(g.id)}"]`);
+    if (qtyEl) qtyEl.textContent = money(qty);
+    if (amountEl) amountEl.textContent = `৳${money(total)}`;
+  });
+}
+
 function updateSummary() {
-  renderPendingParties();
   const rows = activeMeaningfulRows();
   const qty = rows.reduce((sum, r) => sum + Number(r.qty || 0), 0);
   const total = rows.reduce((sum, r) => sum + calcTotal(r), 0);
   const session = sessionTotals();
-  const activeName = getPartyName();
-  if ($('#activePartyNameDisplay')) $('#activePartyNameDisplay').textContent = activeName || 'Current Party';
   if ($('#activePartyQty')) $('#activePartyQty').textContent = money(qty);
   if ($('#activePartyAmount')) $('#activePartyAmount').textContent = `৳${money(total)}`;
+  if ($('#activePartyKicker')) $('#activePartyKicker').textContent = `PARTY ${state.pendingParties.length + 1}`;
+  updatePendingGroupTotals();
   $('#grandTotalTop').textContent = `৳${money(session.total)}`;
   const send = $('#sendBatchBtn');
   if (state.batchSentAt && !state.batchNeedsUpdate) send.textContent = '✓ Sent to Sheet';
@@ -556,11 +585,20 @@ function markBatchDirty() {
   saveDraft();
   updateSummary();
 }
-function getRow(id) { return state.rows.find(r => r.id === id); }
-
-function closeSearches(except = null) {
-  $$('.sku-results').forEach(el => { if (el !== except) el.classList.add('hidden'); });
+function getRow(id) {
+  const active = state.rows.find(r => r.id === id);
+  if (active) return active;
+  for (const g of state.pendingParties || []) {
+    const row = (g.rows || []).find(r => r.id === id);
+    if (row) return row;
+  }
+  return null;
 }
+function getRowGroup(rowId) {
+  if (state.rows.some(r => r.id === rowId)) return { id: 'active', rows: state.rows };
+  return (state.pendingParties || []).find(g => (g.rows || []).some(r => r.id === rowId)) || null;
+}
+
 function renderSearchResults(card, row, query) {
   const box = card.querySelector('.sku-results');
   const results = searchLocalCatalog(query);
@@ -646,7 +684,7 @@ function applyCustomSku(row, card, sku) {
   loadCompareRate(row, card);
 }
 
-$('#productsContainer').addEventListener('input', (event) => {
+$('#appRoot').addEventListener('input', (event) => {
   const field = event.target.closest('[data-field]');
   if (!field) return;
   const card = event.target.closest('.product-card');
@@ -667,14 +705,14 @@ $('#productsContainer').addEventListener('input', (event) => {
   markBatchDirty();
 });
 
-$('#productsContainer').addEventListener('focusin', (event) => {
+$('#appRoot').addEventListener('focusin', (event) => {
   if (!event.target.matches('.sku-input')) return;
   const card = event.target.closest('.product-card');
   const row = getRow(card.dataset.rowId);
   if (row && event.target.value.trim()) scheduleLocalSearch(card, row, event.target.value);
 });
 
-$('#productsContainer').addEventListener('keydown', (event) => {
+$('#appRoot').addEventListener('keydown', (event) => {
   if (!event.target.matches('.sku-input') || event.key !== 'Enter') return;
   event.preventDefault();
   const card = event.target.closest('.product-card');
@@ -684,7 +722,7 @@ $('#productsContainer').addEventListener('keydown', (event) => {
   else card.querySelector('[data-action="custom-entry"]')?.click();
 });
 
-$('#productsContainer').addEventListener('click', (event) => {
+$('#appRoot').addEventListener('click', (event) => {
   const card = event.target.closest('.product-card');
   if (!card) return;
   const row = getRow(card.dataset.rowId);
@@ -722,8 +760,10 @@ $('#productsContainer').addEventListener('click', (event) => {
     return;
   }
   if (event.target.closest('[data-action="remove"]')) {
-    state.rows = state.rows.filter(r => r.id !== row.id);
-    if (!state.rows.length) state.rows.push(rowTemplate());
+    const group = getRowGroup(row.id);
+    if (!group) return;
+    group.rows = (group.rows || []).filter(r => r.id !== row.id);
+    if (group.id === 'active' && !group.rows.length) state.rows.push(rowTemplate());
     renderAll(); markBatchDirty();
     return;
   }
@@ -863,7 +903,7 @@ $('#sharePhotoCardBtn').addEventListener('click', sharePreviewPhotoCard);
 
 document.addEventListener('click', (event) => {
   if (!event.target.closest('.sku-field')) closeSearches();
-  if (!event.target.closest('.party-field')) $('#partyResults')?.classList.add('hidden');
+  if (!event.target.closest('.party-field')) $$('.party-results').forEach(el => el.classList.add('hidden'));
   const close = event.target.closest('[data-close-modal]');
   if (close) $('#'+(close.dataset.closeModal === 'image' ? 'imageModal' : 'historyModal')).classList.add('hidden');
 });
@@ -902,8 +942,11 @@ function moveToNextParty() {
   renderPartySelect();
   renderAll();
   saveDraft();
-  setTimeout(() => $('#partyInput')?.focus(), 40);
-  showToast('Party saved in this purchase. Next Party ready.');
+  setTimeout(() => {
+    $('#activePartyCard')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setTimeout(() => $('#partyInput')?.focus(), 180);
+  }, 40);
+  showToast('Next Party ready below. Previous parties remain editable.');
 }
 $('#nextPartyBtn').addEventListener('click', moveToNextParty);
 
@@ -944,6 +987,88 @@ $('#partyResults').addEventListener('click', (event) => {
     }
     chooseParty(current);
     showToast('New Party selected.');
+  }
+});
+
+
+$('#savedPartyCards').addEventListener('input', (event) => {
+  const input = event.target.closest('.saved-party-input');
+  if (!input) return;
+  const group = getPendingGroup(input.dataset.partyGroupId);
+  if (!group) return;
+  group.partyName = String(input.value || '').trim();
+  const box = input.closest('.party-combobox')?.querySelector('.saved-party-results');
+  if (box) renderInlinePartyResults(box, input.value, group.id);
+  markBatchDirty();
+});
+
+$('#savedPartyCards').addEventListener('focusin', (event) => {
+  const input = event.target.closest('.saved-party-input');
+  if (!input) return;
+  const box = input.closest('.party-combobox')?.querySelector('.saved-party-results');
+  if (box) renderInlinePartyResults(box, input.value, input.dataset.partyGroupId);
+});
+
+$('#savedPartyCards').addEventListener('keydown', (event) => {
+  const input = event.target.closest('.saved-party-input');
+  if (!input) return;
+  const box = input.closest('.party-combobox')?.querySelector('.saved-party-results');
+  if (event.key === 'Escape') {
+    box?.classList.add('hidden');
+    return;
+  }
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  const first = box?.querySelector('[data-saved-party-result="0"]');
+  if (first) first.click();
+  else {
+    const group = getPendingGroup(input.dataset.partyGroupId);
+    if (group) {
+      group.partyName = String(input.value || '').trim();
+      box?.classList.add('hidden');
+      markBatchDirty();
+    }
+  }
+});
+
+$('#savedPartyCards').addEventListener('click', (event) => {
+  const result = event.target.closest('[data-saved-party-result]');
+  if (result) {
+    const group = getPendingGroup(result.dataset.partyGroupId);
+    const box = result.closest('.saved-party-results');
+    const name = box?._results?.[Number(result.dataset.savedPartyResult)];
+    if (group && name) {
+      group.partyName = name;
+      const input = document.querySelector(`.saved-party-input[data-party-group-id="${CSS.escape(group.id)}"]`);
+      if (input) input.value = name;
+      box.classList.add('hidden');
+      markBatchDirty();
+    }
+    return;
+  }
+
+  const newParty = event.target.closest('[data-saved-party-new]');
+  if (newParty) {
+    const group = getPendingGroup(newParty.dataset.partyGroupId);
+    const input = document.querySelector(`.saved-party-input[data-party-group-id="${CSS.escape(newParty.dataset.partyGroupId)}"]`);
+    if (!group || !input) return;
+    const typed = String(input.value || '').trim();
+    if (!typed) return showToast('Type the Party Name first.');
+    group.partyName = typed;
+    newParty.closest('.saved-party-results')?.classList.add('hidden');
+    markBatchDirty();
+    return;
+  }
+
+  const addBtn = event.target.closest('[data-add-product-group]');
+  if (addBtn) {
+    const group = getPendingGroup(addBtn.dataset.addProductGroup);
+    if (!group) return;
+    const row = rowTemplate();
+    group.rows.push(row);
+    renderAll();
+    markBatchDirty();
+    setTimeout(() => document.querySelector(`[data-row-id="${CSS.escape(row.id)}"] .sku-input`)?.focus(), 40);
   }
 });
 
