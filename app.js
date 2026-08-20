@@ -444,17 +444,51 @@ async function loadReferenceData() {
 }
 
 function renderPendingParties() {
-  const wrap = $('#pendingPartiesSection');
-  if (!wrap) return;
-  const groups = state.pendingParties.filter(g => (g.rows || []).some(meaningful));
-  if (!groups.length) { wrap.innerHTML = ''; wrap.classList.add('hidden'); return; }
-  wrap.innerHTML = `${groups.map((g, index) => {
-    const rows = (g.rows || []).filter(meaningful);
-    const qty = rows.reduce((s, r) => s + Number(r.qty || 0), 0);
-    const total = rows.reduce((s, r) => s + calcTotal(r), 0);
-    return `<div class="pending-party-card"><div class="pending-party-main"><div class="pending-party-name">${escapeHtml(g.partyName || 'Party')}</div><div class="pending-party-meta">${rows.length} product${rows.length === 1 ? '' : 's'} • Qty ${money(qty)} • ৳${money(total)}</div></div><div class="pending-party-badge">PARTY ${index + 1}</div></div>`;
-  }).join('')}<div class="party-divider">Next Party</div>`;
-  wrap.classList.remove('hidden');
+  const container = $('#savedPartyCards');
+  if (!container) return;
+
+  const groups = (state.pendingParties || [])
+    .map(g => ({ ...g, rows: (g.rows || []).filter(meaningful) }))
+    .filter(g => g.rows.length && String(g.partyName || '').trim());
+
+  if (!groups.length) {
+    container.innerHTML = '';
+    container.classList.add('hidden');
+    return;
+  }
+
+  container.innerHTML = groups.map(g => {
+    const rows = g.rows || [];
+    const qty = rows.reduce((sum, r) => sum + Number(r.qty || 0), 0);
+    const total = rows.reduce((sum, r) => sum + calcTotal(r), 0);
+    const productLines = rows.map(r => {
+      const q = Number(r.qty || 0);
+      const rate = Number(r.rate || 0);
+      return `
+        <div class="party-product-line">
+          <span class="party-product-sku">${escapeHtml(r.sku || '—')}</span>
+          <span class="party-product-calc">${money(q)} × ৳${money(rate)}</span>
+          <strong>৳${money(calcTotal(r))}</strong>
+        </div>`;
+    }).join('');
+
+    return `
+      <article class="party-group-card saved-party-group">
+        <div class="party-group-head">
+          <div>
+            <span class="party-group-kicker">PARTY</span>
+            <strong class="party-group-name">${escapeHtml(g.partyName)}</strong>
+          </div>
+        </div>
+        <div class="party-products-compact">${productLines}</div>
+        <div class="party-card-total-row">
+          <div><span>Total Qty</span><strong>${money(qty)}</strong></div>
+          <div><span>Total Amount</span><strong>৳${money(total)}</strong></div>
+        </div>
+      </article>`;
+  }).join('');
+
+  container.classList.remove('hidden');
 }
 
 function renderAll() {
@@ -502,12 +536,15 @@ function renderProductCard(row, index) {
 }
 
 function updateSummary() {
+  renderPendingParties();
   const rows = activeMeaningfulRows();
   const qty = rows.reduce((sum, r) => sum + Number(r.qty || 0), 0);
   const total = rows.reduce((sum, r) => sum + calcTotal(r), 0);
   const session = sessionTotals();
-  $('#totalQty').textContent = money(qty);
-  $('#totalAmount').textContent = `৳${money(total)}`;
+  const activeName = getPartyName();
+  if ($('#activePartyNameDisplay')) $('#activePartyNameDisplay').textContent = activeName || 'Current Party';
+  if ($('#activePartyQty')) $('#activePartyQty').textContent = money(qty);
+  if ($('#activePartyAmount')) $('#activePartyAmount').textContent = `৳${money(total)}`;
   $('#grandTotalTop').textContent = `৳${money(session.total)}`;
   const send = $('#sendBatchBtn');
   if (state.batchSentAt && !state.batchNeedsUpdate) send.textContent = '✓ Sent to Sheet';
@@ -866,7 +903,7 @@ function moveToNextParty() {
   renderAll();
   saveDraft();
   setTimeout(() => $('#partyInput')?.focus(), 40);
-  showToast('Next Party ready. Previous party kept in this purchase.');
+  showToast('Party saved in this purchase. Next Party ready.');
 }
 $('#nextPartyBtn').addEventListener('click', moveToNextParty);
 
@@ -981,10 +1018,11 @@ async function sendBatchToSheet() {
   const groups = sessionGroups();
   if (!groups.length) return showToast('Add at least one product.');
   if (groups.some(g => !String(g.partyName || '').trim())) return showToast('Every party needs a Party Name.');
-  if (groups.some(g => g.rows.some(r => !String(r.sku || '').trim()))) return showToast('Every product needs an SKU.');
+
+  const rows = groups.flatMap(g => g.rows.map(r => ({ ...r, partyName: g.partyName })));
+  if (rows.some(r => !String(r.sku || '').trim())) return showToast('Every product needs an SKU.');
   if (!navigator.onLine) return showToast('Internet is required to send to Google Sheet.');
 
-  const allRows = groups.flatMap(g => g.rows.map(r => ({ row: r, partyName: g.partyName })));
   const btn = $('#sendBatchBtn');
   const oldText = btn.textContent;
   btn.disabled = true;
@@ -992,17 +1030,17 @@ async function sendBatchToSheet() {
 
   try {
     const requestId = uid();
-    const payloadRows = allRows.map(({ row: r, partyName }) => ({
+    const payloadRows = rows.map(r => ({
       entryId: r.id,
       sheetRow: Number(r.sheetRow || 0),
-      partyName,
+      partyName: r.partyName,
       sku: r.sku,
       qty: Number(r.qty || 0),
       rate: Number(r.rate || 0),
       remarks: r.remarks || ''
     }));
 
-    const ack = await submitBatchDirect({
+    const form = new URLSearchParams({
       action: 'sendBatchToSheet',
       requestId,
       pin: state.pin,
@@ -1010,21 +1048,42 @@ async function sendBatchToSheet() {
       partyName: '',
       isUpdate: state.batchSentAt ? '1' : '0',
       itemsJson: JSON.stringify(payloadRows)
-    }, requestId, 9000);
+    });
 
-    if (!ack?.ok) throw new Error(ack?.error || 'Could not send products to Google Sheet.');
-    if (Number(ack.count || 0) !== allRows.length) throw new Error('Google Sheet did not save all products. Please try again.');
+    // Reliable Apps Script flow used in the earlier stable builds:
+    // POST once, then poll a tiny acknowledgement from Script Cache.
+    fetch(state.backendUrl, { method: 'POST', mode: 'no-cors', body: form }).catch(() => {});
+
+    let ack = null;
+    const waits = [300, 350, 450, 600, 800, 1050, 1400, 1800];
+    for (const wait of waits) {
+      await new Promise(resolve => setTimeout(resolve, wait));
+      const status = await jsonp('batchStatus', { pin: state.pin, requestId }, 12000);
+      if (status?.done) {
+        ack = status;
+        break;
+      }
+    }
+
+    if (!ack) throw new Error('Google Sheet response is taking too long. Please try once more.');
+    if (!ack.ok) throw new Error(ack.error || 'Could not send products to Google Sheet.');
+    if (Number(ack.count || 0) !== rows.length) throw new Error('Google Sheet did not save all products. Please try again.');
 
     const rowMap = ack.rows || {};
-    state.pendingParties.forEach(g => (g.rows || []).forEach(r => { r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0); }));
-    state.rows.forEach(r => { r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0); });
+    state.pendingParties.forEach(g => (g.rows || []).forEach(r => {
+      r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0);
+    }));
+    state.rows.forEach(r => {
+      r.sheetRow = Number(rowMap[r.id] || r.sheetRow || 0);
+    });
+
     state.batchSentAt = new Date().toISOString();
     state.batchNeedsUpdate = false;
     saveDraft();
     updateSummary();
-    showToast(`${allRows.length} product${allRows.length === 1 ? '' : 's'} sent to Google Sheet.`);
+    showToast(`${rows.length} product${rows.length === 1 ? '' : 's'} from ${groups.length} part${groups.length === 1 ? 'y' : 'ies'} sent to Google Sheet.`);
   } catch (err) {
-    showToast(err.message || 'Could not send to Google Sheet.', 3800);
+    showToast(err.message || 'Could not send to Google Sheet.', 4200);
   } finally {
     btn.disabled = false;
     if (!state.batchSentAt) btn.textContent = oldText;
@@ -1052,7 +1111,7 @@ async function copyForExcel() {
 $('#copyBtn').addEventListener('click', () => { copyForExcel(); closeDrawer(); });
 
 function resetCurrent({ archive = true } = {}) {
-  if (archive && state.rows.some(meaningful)) archiveCurrent();
+  if (archive && sessionProductCount()) archiveCurrent();
   state.date = todayISO(); state.partyName = ''; state.rows = [rowTemplate()]; state.pendingParties = []; state.batchSentAt = ''; state.batchNeedsUpdate = false;
   $('#purchaseDate').value = state.date; renderPartySelect(); renderAll(); saveDraft();
 }
@@ -1087,8 +1146,8 @@ $('#historyList').addEventListener('click', (event) => {
   if (!btn) return;
   const item = readHistory().find(x => x.id === btn.dataset.restoreHistory);
   if (!item) return showToast('History item not found.');
-  if (state.rows.some(meaningful) && !confirm('Restore this history? Current entries will be archived first.')) return;
-  if (state.rows.some(meaningful)) archiveCurrent();
+  if (sessionProductCount() && !confirm('Restore this history? Current purchase session will be archived first.')) return;
+  if (sessionProductCount()) archiveCurrent();
   state.date = item.date || todayISO();
   if (Array.isArray(item.groups) && item.groups.length) {
     const restored = item.groups.map(g => ({ id: g.id || uid(), partyName: g.partyName || '', rows: (g.rows || []).map(r => ({ ...rowTemplate(), ...r, id: r.id || uid() })) }));
