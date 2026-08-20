@@ -600,6 +600,12 @@ function getRowGroup(rowId) {
   return (state.pendingParties || []).find(g => (g.rows || []).some(r => r.id === rowId)) || null;
 }
 
+function closeSearches(except = null) {
+  $$('.sku-results').forEach(el => {
+    if (el !== except) el.classList.add('hidden');
+  });
+}
+
 function renderSearchResults(card, row, query) {
   const box = card.querySelector('.sku-results');
   const results = searchLocalCatalog(query);
@@ -621,7 +627,7 @@ function scheduleLocalSearch(card, row, query) {
     if (!clean) return box?.classList.add('hidden');
     closeSearches(box);
 
-    // v4.7.1: recover the local index if catalog metadata is loaded but memory was not rebuilt.
+    // v4.7.2: recover the local index if catalog metadata is loaded but memory was not rebuilt.
     if (!state.catalogReady) {
       try {
         const items = await idbGetAll();
@@ -759,10 +765,18 @@ function wireProductCard(card) {
     if (event.target.closest('[data-action="remove"]')) {
       event.preventDefault();
       event.stopPropagation();
-      const group = getRowGroup(row.id);
-      if (!group) return;
-      group.rows = (group.rows || []).filter(r => r.id !== row.id);
-      if (group.id === 'active' && !group.rows.length) group.rows.push(rowTemplate());
+      const activeIndex = state.rows.findIndex(r => r.id === row.id);
+      if (activeIndex >= 0) {
+        state.rows = state.rows.filter(r => r.id !== row.id);
+        if (!state.rows.length) state.rows = [rowTemplate()];
+      } else {
+        const group = (state.pendingParties || []).find(g => (g.rows || []).some(r => r.id === row.id));
+        if (!group) return;
+        group.rows = (group.rows || []).filter(r => r.id !== row.id);
+        if (!group.rows.length) {
+          state.pendingParties = state.pendingParties.filter(g => g.id !== group.id);
+        }
+      }
       renderAll();
       markBatchDirty();
       showToast('Product removed.');
