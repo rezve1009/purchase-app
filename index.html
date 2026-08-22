@@ -10,7 +10,7 @@
   <title>Daily Purchase</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-  <link rel="stylesheet" href="./styles.css?v=4.7.2" />
+  <link rel="stylesheet" href="./styles.css?v=4.8.0" />
 </head>
 <body>
   <div id="loginScreen" class="login-screen">
@@ -132,7 +132,7 @@
       <button id="connectionBtn" class="drawer-action" type="button"><span>⌁</span><div><strong>Connection</strong><small>Change Apps Script URL</small></div></button>
       <button id="logoutBtn" class="drawer-action" type="button"><span>↪</span><div><strong>Log out</strong><small>Clear PIN from this session</small></div></button>
     </div>
-    <div class="version-text">v4.7.2</div>
+    <div class="version-text">v4.8.0</div>
   </aside>
 
   <div id="toast" class="toast"></div>
@@ -160,6 +160,36 @@
     </div>
   </div>
 
+  <div id="movePartyModal" class="modal hidden">
+    <div class="modal-backdrop" data-close-modal="move-party"></div>
+    <div class="modal-card move-party-modal-card">
+      <div class="modal-heading">
+        <div>
+          <div class="eyebrow">CHANGE PARTY</div>
+          <h2>Move Product</h2>
+        </div>
+        <button class="icon-button" type="button" data-close-modal="move-party" aria-label="Close">×</button>
+      </div>
+
+      <div class="move-product-chip">
+        <strong id="moveProductSku">SKU</strong>
+        <span id="moveProductFrom">Current party</span>
+      </div>
+
+      <div class="move-section-label">Move to a party already in this purchase</div>
+      <div id="moveExistingParties" class="move-existing-parties"></div>
+
+      <div class="move-divider"><span>OR</span></div>
+
+      <div class="move-section-label">Select another party</div>
+      <div class="move-party-search-wrap">
+        <input id="movePartySearchInput" class="input" type="text" autocomplete="off" placeholder="Type Party Name" />
+        <div id="movePartySearchResults" class="move-party-search-results"></div>
+      </div>
+      <div class="move-modal-note">Selecting a party already used in this purchase will move the product into that party. A different party creates a separate editable party card.</div>
+    </div>
+  </div>
+
   <div id="historyModal" class="modal hidden">
     <div class="modal-backdrop" data-close-modal="history"></div>
     <div class="modal-card history-card">
@@ -171,6 +201,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=4.7.2" defer></script>
+  <script src="./app.js?v=4.8.0" defer></script>
 </body>
 </html>

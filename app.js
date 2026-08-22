@@ -20,7 +20,8 @@ const state = {
   batchSentAt: '',
   batchNeedsUpdate: false,
   syncing: false,
-  previewRowId: ''
+  previewRowId: '',
+  moveRowId: ''
 };
 
 const KEYS = {
@@ -527,7 +528,10 @@ function renderProductCard(row, index, groupId = 'active') {
   card.innerHTML = `
     <div class="product-card-head">
       <div class="product-number">PRODUCT ${index + 1}</div>
-      <button class="remove-product" type="button" data-action="remove" aria-label="Remove product">×</button>
+      <div class="product-head-actions">
+        <button class="move-product" type="button" data-action="move-party" aria-label="Change Party" title="Change Party">⇄</button>
+        <button class="remove-product" type="button" data-action="remove" aria-label="Remove product">×</button>
+      </div>
     </div>
     <div class="product-grid">
       <div class="field sku-field">
@@ -705,6 +709,199 @@ function applyCustomSku(row, card, sku) {
   loadCompareRate(row, card);
 }
 
+
+function getPartyNameForGroup(groupId) {
+  if (groupId === 'active') return getPartyName();
+  return getPendingGroup(groupId)?.partyName || '';
+}
+
+function locateRow(rowId) {
+  const activeIndex = state.rows.findIndex(r => r.id === rowId);
+  if (activeIndex >= 0) return { type: 'active', groupId: 'active', index: activeIndex, row: state.rows[activeIndex] };
+  const pendingIndex = (state.pendingParties || []).findIndex(g => (g.rows || []).some(r => r.id === rowId));
+  if (pendingIndex >= 0) {
+    const group = state.pendingParties[pendingIndex];
+    const rowIndex = (group.rows || []).findIndex(r => r.id === rowId);
+    return { type: 'pending', groupId: group.id, pendingIndex, index: rowIndex, group, row: group.rows[rowIndex] };
+  }
+  return null;
+}
+
+function sessionPartyTargets(excludeRowId = '') {
+  const source = locateRow(excludeRowId);
+  const sourceGroupId = source?.groupId || '';
+  const targets = [];
+  (state.pendingParties || []).forEach((g, i) => {
+    const name = String(g.partyName || '').trim();
+    if (!name || g.id === sourceGroupId) return;
+    targets.push({ id: g.id, partyName: name, label: `PARTY ${i + 1}`, count: (g.rows || []).filter(meaningful).length });
+  });
+  const activeName = getPartyName();
+  if (activeName && sourceGroupId !== 'active') {
+    targets.push({ id: 'active', partyName: activeName, label: `PARTY ${state.pendingParties.length + 1}`, count: activeMeaningfulRows().length });
+  }
+  return targets;
+}
+
+function renderMoveExistingParties() {
+  const box = $('#moveExistingParties');
+  if (!box) return;
+  const targets = sessionPartyTargets(state.moveRowId);
+  if (!targets.length) {
+    box.innerHTML = '<div class="move-empty">No other party in this purchase yet.</div>';
+    return;
+  }
+  box.innerHTML = targets.map(t => `
+    <button class="move-party-option" type="button" data-move-target-group="${escapeHtml(t.id)}">
+      <span class="move-party-option-main">
+        <strong>${escapeHtml(t.partyName)}</strong>
+        <small>${escapeHtml(t.label)} • ${Number(t.count || 0)} product${Number(t.count || 0) === 1 ? '' : 's'}</small>
+      </span>
+      <span class="move-party-arrow">→</span>
+    </button>`).join('');
+}
+
+function renderMovePartySearch(query = '') {
+  const box = $('#movePartySearchResults');
+  if (!box) return;
+  const q = String(query || '').trim();
+  const source = locateRow(state.moveRowId);
+  const sourceParty = normalizeParty(getPartyNameForGroup(source?.groupId || ''));
+  const results = searchPartyList(q).filter(name => normalizeParty(name) !== sourceParty).slice(0, 20);
+  box._results = results;
+  const html = results.map((name, index) => `
+    <button class="move-search-result" type="button" data-move-party-index="${index}">
+      <span>◦</span><strong>${escapeHtml(name)}</strong>
+    </button>`).join('');
+  const newEntry = q
+    ? `<button class="move-search-new" type="button" data-move-new-party="1">＋ New Party: ${escapeHtml(q)}</button>`
+    : '';
+  box.innerHTML = `${html || (q ? '<div class="move-empty">No matching party found.</div>' : '<div class="move-empty">Type a party name to search.</div>')}${newEntry}`;
+}
+
+function openMovePartyModal(rowId) {
+  const row = getRow(rowId);
+  if (!row) return;
+  state.moveRowId = rowId;
+  $('#moveProductSku').textContent = row.sku ? `SKU: ${row.sku}` : 'Product without SKU';
+  const source = locateRow(rowId);
+  const sourceName = getPartyNameForGroup(source?.groupId || '');
+  $('#moveProductFrom').textContent = sourceName ? `Currently under: ${sourceName}` : 'Current party';
+  $('#movePartySearchInput').value = '';
+  renderMoveExistingParties();
+  renderMovePartySearch('');
+  $('#movePartyModal').classList.remove('hidden');
+  setTimeout(() => {
+    if (!sessionPartyTargets(rowId).length) $('#movePartySearchInput')?.focus();
+  }, 80);
+}
+
+function closeMovePartyModal() {
+  $('#movePartyModal')?.classList.add('hidden');
+  state.moveRowId = '';
+}
+
+function addMovedRowToTarget(row, targetGroupId) {
+  if (targetGroupId === 'active') {
+    const meaningfulActive = state.rows.some(meaningful);
+    if (!meaningfulActive) state.rows = [row];
+    else state.rows.push(row);
+    return true;
+  }
+  const group = getPendingGroup(targetGroupId);
+  if (!group) return false;
+  group.rows = Array.isArray(group.rows) ? group.rows : [];
+  group.rows.push(row);
+  return true;
+}
+
+function moveRowToExistingParty(rowId, targetGroupId) {
+  const source = locateRow(rowId);
+  if (!source) return showToast('Product not found.');
+  if (source.groupId === targetGroupId) return showToast('Product is already under this party.');
+
+  const movedRow = source.row;
+  if (source.type === 'active') {
+    state.rows.splice(source.index, 1);
+    if (!state.rows.some(meaningful)) {
+      state.partyName = '';
+      if ($('#partyInput')) $('#partyInput').value = '';
+    }
+  } else {
+    source.group.rows.splice(source.index, 1);
+    if (!source.group.rows.length) state.pendingParties.splice(source.pendingIndex, 1);
+  }
+
+  if (!addMovedRowToTarget(movedRow, targetGroupId)) {
+    if (source.type === 'active') state.rows.push(movedRow);
+    else {
+      const restoreGroup = getPendingGroup(source.groupId);
+      if (restoreGroup) restoreGroup.rows.push(movedRow);
+      else state.pendingParties.splice(Math.min(source.pendingIndex, state.pendingParties.length), 0, { id: source.groupId, partyName: source.group.partyName || '', rows: [movedRow] });
+    }
+    return showToast('Target party not found.');
+  }
+
+  if (!state.rows.length) state.rows = [rowTemplate()];
+  renderPartySelect();
+  renderAll();
+  markBatchDirty();
+  closeMovePartyModal();
+  setTimeout(() => document.querySelector(`[data-row-id="${CSS.escape(rowId)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80);
+  showToast('Product moved to another party.');
+}
+
+function findSessionPartyByName(name, excludeGroupId = '') {
+  const target = normalizeParty(name);
+  if (!target) return null;
+  for (const g of state.pendingParties || []) {
+    if (g.id !== excludeGroupId && normalizeParty(g.partyName) === target) return g.id;
+  }
+  if (excludeGroupId !== 'active' && normalizeParty(getPartyName()) === target) return 'active';
+  return null;
+}
+
+function moveRowToNewParty(rowId, partyName) {
+  const clean = String(partyName || '').trim();
+  if (!clean) return showToast('Select or type a Party Name.');
+  const source = locateRow(rowId);
+  if (!source) return showToast('Product not found.');
+
+  const existing = findSessionPartyByName(clean, source.groupId);
+  if (existing) return moveRowToExistingParty(rowId, existing);
+  if (normalizeParty(getPartyNameForGroup(source.groupId)) === normalizeParty(clean)) {
+    return showToast('Product is already under this party.');
+  }
+
+  const movedRow = source.row;
+
+  if (source.type === 'active') {
+    state.rows.splice(source.index, 1);
+    const remaining = state.rows.filter(meaningful);
+    const oldPartyName = getPartyName();
+
+    if (remaining.length) {
+      state.pendingParties.push({ id: uid(), partyName: oldPartyName, rows: remaining });
+    }
+    state.partyName = clean;
+    state.rows = [movedRow];
+    $('#partyInput').value = clean;
+  } else {
+    source.group.rows.splice(source.index, 1);
+    const insertAt = source.group.rows.length ? source.pendingIndex + 1 : source.pendingIndex;
+    if (!source.group.rows.length) state.pendingParties.splice(source.pendingIndex, 1);
+    state.pendingParties.splice(Math.min(insertAt, state.pendingParties.length), 0, { id: uid(), partyName: clean, rows: [movedRow] });
+  }
+
+  if (!state.rows.length) state.rows = [rowTemplate()];
+  renderPartySelect();
+  renderAll();
+  markBatchDirty();
+  closeMovePartyModal();
+  setTimeout(() => document.querySelector(`[data-row-id="${CSS.escape(rowId)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80);
+  showToast(`Product moved to ${clean}.`);
+}
+
 function wireProductCard(card) {
   if (!card || card.dataset.productEventsWired === '1') return;
   card.dataset.productEventsWired = '1';
@@ -761,6 +958,13 @@ function wireProductCard(card) {
   card.addEventListener('click', (event) => {
     const row = currentRow();
     if (!row) return;
+
+    if (event.target.closest('[data-action="move-party"]')) {
+      event.preventDefault();
+      event.stopPropagation();
+      openMovePartyModal(row.id);
+      return;
+    }
 
     if (event.target.closest('[data-action="remove"]')) {
       event.preventDefault();
@@ -1266,6 +1470,38 @@ async function sendBatchToSheet() {
     updateSummary();
   }
 }
+
+
+$('#moveExistingParties').addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-move-target-group]');
+  if (!btn || !state.moveRowId) return;
+  moveRowToExistingParty(state.moveRowId, btn.dataset.moveTargetGroup);
+});
+
+$('#movePartySearchInput').addEventListener('input', (event) => renderMovePartySearch(event.target.value));
+$('#movePartySearchInput').addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') return closeMovePartyModal();
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  const first = $('#movePartySearchResults').querySelector('[data-move-party-index="0"]');
+  if (first) first.click();
+  else {
+    const value = $('#movePartySearchInput').value.trim();
+    if (value) moveRowToNewParty(state.moveRowId, value);
+  }
+});
+$('#movePartySearchResults').addEventListener('click', (event) => {
+  const result = event.target.closest('[data-move-party-index]');
+  if (result) {
+    const name = $('#movePartySearchResults')._results?.[Number(result.dataset.movePartyIndex)];
+    if (name) moveRowToNewParty(state.moveRowId, name);
+    return;
+  }
+  if (event.target.closest('[data-move-new-party]')) {
+    moveRowToNewParty(state.moveRowId, $('#movePartySearchInput').value);
+  }
+});
+$$('[data-close-modal="move-party"]').forEach(el => el.addEventListener('click', closeMovePartyModal));
 
 $('#sendBatchBtn').addEventListener('click', sendBatchToSheet);
 
